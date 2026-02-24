@@ -170,25 +170,13 @@ def build_outcome_dataset(df, delivery_col, eligibility_col="eligible_event"):
 # MODEL 1: TIME TO EXTUBATION (Cox PH with competing risk)
 # ============================================================
 
-def fit_cox_extubation(day_level_df):
-    """Cox PH for time to extubation with TIME-VARYING delivery exposure.
+def _build_cox_tv_dataset(day_level_df):
+    """Build counting-process dataset shared by cause-specific Cox models.
 
-    Uses counting-process (start-stop) format to avoid immortal time bias:
-    each ventilator-day is an interval, and delivery switches from 0→1 on
-    the day it first occurs.
-
-    Death is treated as a competing event (censored at death).
-
-    Returns dict with HR, 95% CI, p-value.
+    Returns (model_df, covariates) where model_df has start/stop intervals,
+    time-varying delivery (cummax), baseline covariates, and event indicators
+    for both extubation and death.
     """
-    try:
-        from lifelines import CoxTimeVaryingFitter
-    except ImportError:
-        print("lifelines not installed. Install with: pip install lifelines")
-        return _placeholder_result("Cox TV - Time to Extubation")
-
-    # Build start-stop dataset: one row per ventilator-day per patient
-    # day_level_df already has one row per eligible vent-day
     hosp_info = day_level_df.groupby("hospitalization_id").agg(
         age=("age_at_admission", "first"),
         sex=("sex_category", "first"),
@@ -199,84 +187,144 @@ def fit_cox_extubation(day_level_df):
     hosp_info["sex_male"] = (hosp_info["sex"].str.lower() == "male").astype(int)
     hosp_info["race_white"] = (hosp_info["race"].str.lower().str.contains("white", na=False)).astype(int)
 
-    # Create counting-process intervals with time-varying covariates
     tv_cols = ["hospitalization_id", "hosp_id_day_key", "delivery"]
-    # Add available clinical covariates as time-varying
     for c in ["fio2_set", "peep_set", "on_vasopressor", "on_sedation", "rass"]:
         if c in day_level_df.columns:
             tv_cols.append(c)
     tv = day_level_df[tv_cols].copy()
     tv = tv.sort_values(["hospitalization_id", "hosp_id_day_key"])
     tv["day_idx"] = tv.groupby("hospitalization_id").cumcount()
-
-    # Time-varying delivery: once delivered, stays 1 for all subsequent days
     tv["delivered_cummax"] = tv.groupby("hospitalization_id")["delivery"].cummax()
-
     tv["start"] = tv["day_idx"]
     tv["stop"] = tv["day_idx"] + 1
 
-    # Add baseline covariates and event
     tv = tv.merge(hosp_info[["hospitalization_id", "age", "sex_male", "race_white",
                               "died", "total_vent_days"]], on="hospitalization_id", how="left")
 
-    # Event on last interval only: extubation if survived
+    # Event indicators on last interval only
     tv["is_last"] = tv.groupby("hospitalization_id")["stop"].transform("max") == tv["stop"]
-    tv["event"] = ((tv["is_last"]) & (tv["died"] == 0)).astype(int)
+    # Cause 1: extubation (survived to end of ventilation)
+    tv["event_extubation"] = ((tv["is_last"]) & (tv["died"] == 0)).astype(int)
+    # Cause 2: death while ventilated
+    tv["event_death"] = ((tv["is_last"]) & (tv["died"] == 1)).astype(int)
 
     covariates = ["delivered_cummax", "age", "sex_male", "race_white"]
-    # Add available time-varying clinical covariates
     for c in ["fio2_set", "peep_set", "on_vasopressor", "on_sedation"]:
         if c in tv.columns and tv[c].notna().sum() > len(tv) * 0.3:
             tv[c] = tv[c].fillna(tv[c].median())
             covariates.append(c)
-    model_df = tv[["hospitalization_id", "start", "stop", "event"] + covariates].dropna()
 
-    if model_df["event"].sum() < 5:
-        return _placeholder_result("Cox TV - Time to Extubation (too few events)")
+    keep = ["hospitalization_id", "start", "stop",
+            "event_extubation", "event_death"] + covariates
+    model_df = tv[keep].dropna()
+    return model_df, covariates
+
+
+def _fit_cause_specific_cox(model_df, covariates, event_col, model_label):
+    """Fit a single cause-specific Cox model for the given event column.
+
+    For the competing cause, events are censored (set to 0).
+    Returns dict with HR, 95% CI, p-value for delivered_cummax.
+    """
+    from lifelines import CoxTimeVaryingFitter
+
+    fit_df = model_df[["hospitalization_id", "start", "stop", event_col] + covariates].copy()
+    fit_df = fit_df.rename(columns={event_col: "event"})
+
+    if fit_df["event"].sum() < 5:
+        return _placeholder_result(f"{model_label} (too few events)")
+
+    ctv = CoxTimeVaryingFitter()
+    ctv.fit(fit_df, id_col="hospitalization_id",
+            start_col="start", stop_col="stop", event_col="event")
+
+    summary = ctv.summary
+    result = {"model": model_label, "exposure": "SAT/SBT Delivery (time-varying)"}
+    if "delivered_cummax" in summary.index:
+        row = summary.loc["delivered_cummax"]
+        result["HR"] = round(np.exp(row["coef"]), 3)
+        result["HR_lower_95"] = round(np.exp(row["coef"] - 1.96 * row["se(coef)"]), 3)
+        result["HR_upper_95"] = round(np.exp(row["coef"] + 1.96 * row["se(coef)"]), 3)
+        result["p_value"] = round(row["p"], 4)
+    return result
+
+
+def fit_cox_extubation(day_level_df):
+    """Cause-specific Cox PH models for time to extubation with competing risk of death.
+
+    Implements proper competing-risk analysis via two cause-specific hazard models
+    (Fine & Gray, JASA 1999; Putter et al., Stat Med 2007):
+      - Cause 1: Extubation (primary outcome) — death is censored
+      - Cause 2: Death while ventilated (competing risk) — extubation is censored
+
+    Uses counting-process (start-stop) format with time-varying delivery exposure
+    (cummax) to avoid immortal time bias (Suissa, Am J Epidemiol 2008).
+
+    Returns dict with HRs from both cause-specific models.
+    """
+    try:
+        from lifelines import CoxTimeVaryingFitter  # noqa: F401
+    except ImportError:
+        print("lifelines not installed. Install with: pip install lifelines")
+        return _placeholder_result("Cause-specific Cox - Extubation")
 
     try:
-        ctv = CoxTimeVaryingFitter()
-        ctv.fit(model_df, id_col="hospitalization_id",
-                start_col="start", stop_col="stop", event_col="event")
-
-        summary = ctv.summary
-        result = {
-            "model": "Cox TV - Time to Extubation",
-            "exposure": "SAT/SBT Delivery (time-varying)",
-        }
-        if "delivered_cummax" in summary.index:
-            row = summary.loc["delivered_cummax"]
-            result["HR"] = round(np.exp(row["coef"]), 3)
-            result["HR_lower_95"] = round(np.exp(row["coef"] - 1.96 * row["se(coef)"]), 3)
-            result["HR_upper_95"] = round(np.exp(row["coef"] + 1.96 * row["se(coef)"]), 3)
-            result["p_value"] = round(row["p"], 4)
-        return result
+        model_df, covariates = _build_cox_tv_dataset(day_level_df)
     except Exception as e:
-        print(f"Cox time-varying model failed: {e}")
-        return _placeholder_result("Cox TV - Time to Extubation")
+        print(f"Failed to build Cox TV dataset: {e}")
+        return _placeholder_result("Cause-specific Cox - Extubation")
+
+    # Cause 1: Extubation (death censored)
+    try:
+        result_extub = _fit_cause_specific_cox(
+            model_df, covariates, "event_extubation",
+            "Cause-specific Cox - Extubation (death censored)")
+    except Exception as e:
+        print(f"Cause-specific Cox (extubation) failed: {e}")
+        result_extub = _placeholder_result("Cause-specific Cox - Extubation")
+
+    # Cause 2: Death (extubation censored) — reported for completeness
+    try:
+        result_death = _fit_cause_specific_cox(
+            model_df, covariates, "event_death",
+            "Cause-specific Cox - Death (extubation censored)")
+    except Exception as e:
+        print(f"Cause-specific Cox (death) failed: {e}")
+        result_death = _placeholder_result("Cause-specific Cox - Death")
+
+    # Return primary result (extubation) with competing-risk death result nested
+    result = result_extub.copy()
+    result["competing_risk_death"] = result_death
+    return result
 
 
 # ============================================================
-# MODEL 2: VENTILATOR-FREE DAYS (ZINB)
+# MODEL 2: VENTILATOR-FREE DAYS (Proportional Odds)
 # ============================================================
 
 def fit_vfd_model(day_level_df):
-    """Hurdle model for VFDs at 28 days.
+    """Proportional odds ordinal regression for VFDs at 28 days.
 
-    Two-part model to properly separate structural zeros from count data:
-    - Part 1 (hurdle): Logistic regression for death (VFD=0 structurally)
-    - Part 2 (count): Truncated negative binomial for VFD|survived (VFD>0)
+    Recommended over hurdle/ZINB models which have inflated Type I error
+    for VFD outcomes (Renard Triché et al., Crit Care 2025, PMID 40537834).
 
-    This avoids the ZINB pitfall of conflating structural zeros (death)
-    with sampling zeros (survived but ventilated all 28 days).
+    VFDs are binned into ordinal categories:
+      0 = dead (VFD=0 by convention, Schoenfeld & Bernard, Crit Care Med 2002)
+      1 = survived, VFD 0-7 (prolonged ventilation)
+      2 = survived, VFD 8-14
+      3 = survived, VFD 15-21
+      4 = survived, VFD 22-28 (rapid liberation)
 
-    Returns dict with results from both parts.
+    The proportional odds model estimates a common OR across all cut-points,
+    interpreted as: higher OR = greater odds of being in a better VFD category.
+
+    Returns dict with OR, 95% CI, p-value for delivery effect.
     """
     try:
-        import statsmodels.api as sm
+        from statsmodels.miscmodels.ordinal_model import OrderedModel
     except ImportError:
-        print("statsmodels not installed.")
-        return _placeholder_result("Hurdle - VFDs at 28 days")
+        print("statsmodels >= 0.13 required for OrderedModel.")
+        return _placeholder_result("Proportional Odds - VFDs at 28 days")
 
     agg_dict = {
         "ever_delivered": ("delivery", "max"),
@@ -286,7 +334,6 @@ def fit_vfd_model(day_level_df):
         "vfd_28": ("vfd_28", "first"),
         "died": ("died", "first"),
     }
-    # Add available clinical covariates (episode-level summaries)
     for c, func in [("fio2_set", "median"), ("peep_set", "median"),
                      ("on_vasopressor", "max"), ("on_sedation", "max")]:
         if c in day_level_df.columns:
@@ -296,63 +343,64 @@ def fit_vfd_model(day_level_df):
 
     hosp["sex_male"] = (hosp["sex"].str.lower() == "male").astype(int)
     hosp["race_white"] = (hosp["race"].str.lower().str.contains("white", na=False)).astype(int)
+
+    # Ordinal VFD categories: death=0, then weekly bins for survivors
+    def _vfd_category(row):
+        if row["died"] == 1:
+            return 0  # dead
+        vfd = row["vfd_28"]
+        if vfd <= 7:
+            return 1
+        elif vfd <= 14:
+            return 2
+        elif vfd <= 21:
+            return 3
+        else:
+            return 4
+
+    hosp["vfd_ordinal"] = hosp.apply(_vfd_category, axis=1)
+
     covariates = ["ever_delivered", "age", "sex_male", "race_white"]
-    # Add clinical covariates with >=30% completeness
     for c in ["fio2_set", "peep_set", "on_vasopressor", "on_sedation"]:
         if c in hosp.columns and hosp[c].notna().sum() > len(hosp) * 0.3:
             hosp[c] = hosp[c].fillna(hosp[c].median())
             covariates.append(c)
-    model_df = hosp[covariates + ["vfd_28", "died"]].dropna()
+    model_df = hosp[covariates + ["vfd_ordinal"]].dropna()
 
-    X = sm.add_constant(model_df[covariates])
-    delivery_idx = covariates.index("ever_delivered") + 1  # +1 for constant
+    if model_df["vfd_ordinal"].nunique() < 2:
+        return _placeholder_result("Proportional Odds - VFDs (insufficient categories)")
 
     result = {
-        "model": "Hurdle - VFDs at 28 days",
+        "model": "Proportional Odds - VFDs at 28 days",
         "exposure": "SAT/SBT Delivery (ever)",
+        "vfd_category_counts": model_df["vfd_ordinal"].value_counts().sort_index().to_dict(),
     }
 
-    # Part 1: Logistic for death (structural zero)
     try:
-        y_death = model_df["died"].astype(int)
-        logit = sm.Logit(y_death, X).fit(disp=False, maxiter=300)
-        params = logit.params
-        conf = logit.conf_int()
-        pvals = logit.pvalues
-        result["hurdle_OR"] = round(np.exp(params.iloc[delivery_idx]), 3)
-        result["hurdle_OR_lower_95"] = round(np.exp(conf.iloc[delivery_idx, 0]), 3)
-        result["hurdle_OR_upper_95"] = round(np.exp(conf.iloc[delivery_idx, 1]), 3)
-        result["hurdle_p_value"] = round(pvals.iloc[delivery_idx], 4)
-    except Exception as e:
-        print(f"Hurdle part 1 (logistic) failed: {e}")
-        result["hurdle_note"] = f"Part 1 failed: {e}"
-
-    # Part 2: NB for VFD among survivors (VFD > 0)
-    try:
-        survivors = model_df[model_df["died"] == 0]
-        if len(survivors) < 10:
-            result["count_note"] = "Too few survivors for count model"
-            return result
-
-        X_surv = sm.add_constant(survivors[covariates])
-        y_vfd = survivors["vfd_28"].astype(int)
-
-        # Use NB for count part (truncated at 0: exclude VFD=0 survivors)
-        # VFD=0 among survivors means ventilated all 28 days (rare but possible)
-        nb = sm.NegativeBinomial(y_vfd, X_surv, loglike_method="nb2").fit(
-            disp=False, maxiter=300
+        mod = OrderedModel(
+            model_df["vfd_ordinal"],
+            model_df[covariates],
+            distr="logit",
         )
-        params = nb.params
-        conf = nb.conf_int()
-        pvals = nb.pvalues
+        fit = mod.fit(method="bfgs", disp=False, maxiter=500)
 
-        result["count_IRR"] = round(np.exp(params.iloc[delivery_idx]), 3)
-        result["count_IRR_lower_95"] = round(np.exp(conf.iloc[delivery_idx, 0]), 3)
-        result["count_IRR_upper_95"] = round(np.exp(conf.iloc[delivery_idx, 1]), 3)
-        result["count_p_value"] = round(pvals.iloc[delivery_idx], 4)
+        # In OrderedModel, covariate coefficients are first, thresholds after.
+        # Positive coef = higher odds of being in a higher (better) category.
+        delivery_idx = covariates.index("ever_delivered")
+        coef = fit.params.iloc[delivery_idx]
+        se = fit.bse.iloc[delivery_idx]
+        pval = fit.pvalues.iloc[delivery_idx]
+
+        result["OR"] = round(np.exp(coef), 3)
+        result["OR_lower_95"] = round(np.exp(coef - 1.96 * se), 3)
+        result["OR_upper_95"] = round(np.exp(coef + 1.96 * se), 3)
+        result["p_value"] = round(pval, 4)
+        result["interpretation"] = (
+            "OR > 1 means delivery associated with higher (better) VFD category"
+        )
     except Exception as e:
-        print(f"Hurdle part 2 (count) failed: {e}")
-        result["count_note"] = f"Part 2 failed: {e}"
+        print(f"Proportional odds VFD model failed: {e}")
+        result["note"] = f"Model failed: {e}"
 
     return result
 
@@ -680,10 +728,17 @@ def run_all_models(sat_file, sbt_file, output_dir):
             ]:
                 try:
                     result = model_fn(day_df)
+                    # Extract nested competing-risk death result if present
+                    cr_death = result.pop("competing_risk_death", None)
                     result["trial_type"] = label
                     result["delivery_definition"] = dcol
                     results.append(result)
                     print(f"  {result.get('model', 'Unknown')}: {result}")
+                    if cr_death and isinstance(cr_death, dict):
+                        cr_death["trial_type"] = label
+                        cr_death["delivery_definition"] = dcol
+                        results.append(cr_death)
+                        print(f"  {cr_death.get('model', 'Unknown')}: {cr_death}")
                 except Exception as e:
                     print(f"  {model_fn.__name__} failed: {e}")
                     results.append({
