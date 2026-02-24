@@ -162,15 +162,15 @@
 
 ## 4. Priority Action Items
 
-| Priority | Action | Effort |
+| Priority | Action | Status |
 |----------|--------|--------|
-| **CRITICAL** | Add proportional odds model for VFDs as primary or sensitivity analysis | 2-3 hours |
-| **CRITICAL** | Fix Cox competing risk: implement cause-specific hazard (two Cox models) or Fine-Gray | 2 hours |
-| HIGH | Add all citations above to manuscript Methods section | 1 hour |
-| HIGH | Verify GEE uses robust sandwich SEs; report working correlation | 30 min |
-| MEDIUM | Switch meta-analysis to REML + HKSJ CI; keep DL as sensitivity | 1-2 hours |
-| MEDIUM | Clarify BH correction scope in Methods text | 15 min |
-| LOW | Add kappa CIs and Landis-Koch interpretation | 15 min |
+| **CRITICAL** | Add proportional odds model for VFDs as primary or sensitivity analysis | DONE |
+| **CRITICAL** | Fix Cox competing risk: implement cause-specific hazard (two Cox models) or Fine-Gray | DONE |
+| HIGH | Add all citations above to manuscript Methods section | Citations provided above |
+| HIGH | Verify GEE uses robust sandwich SEs; report working correlation | DONE |
+| MEDIUM | Switch meta-analysis to REML + HKSJ CI; keep DL as sensitivity | DONE |
+| MEDIUM | Clarify BH correction scope in Methods text | DONE |
+| LOW | Add kappa CIs and Landis-Koch interpretation | DONE |
 
 ---
 

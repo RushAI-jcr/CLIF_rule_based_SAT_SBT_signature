@@ -66,12 +66,36 @@ def inv_logit(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
+def _hksj_adjustment(eff, var_eff, pooled_eff, tau2, k):
+    """Hartung-Knapp-Sidik-Jonkman CI adjustment for random-effects meta-analysis.
+
+    Replaces the standard normal z-based CI with a t-distribution CI using
+    a corrected variance estimate. Recommended when k < 20 studies.
+
+    References:
+        IntHout J, et al. BMC Med Res Methodol. 2014;14:25. PMID: 24548571
+        Hartung J, Knapp G. Stat Med. 2001;20(24):3875-3889.
+
+    Returns (se_hksj, t_crit) for use in CI: pooled ± t_crit * se_hksj
+    """
+    from scipy import stats as sp_stats
+    w = 1.0 / (var_eff + tau2)
+    q_hksj = np.sum(w * (eff - pooled_eff) ** 2) / (k - 1)
+    # Apply correction factor (ensure >= 1 to avoid anti-conservative CIs)
+    q_hksj = max(q_hksj, 1.0)
+    se_re = np.sqrt(1.0 / np.sum(w))
+    se_hksj = se_re * np.sqrt(q_hksj)
+    t_crit = sp_stats.t.ppf(0.975, df=k - 1)
+    return se_hksj, t_crit
+
+
 def run_proportion_meta_analysis(
     sites_df: pd.DataFrame,
     rate_col: str,
     n_col: str,
     label_col: str = "site_name",
-    method: str = "dl",
+    method: str = "reml",
+    use_hksj: bool = True,
 ):
     """Meta-analysis of proportions using logit transformation.
 
@@ -84,7 +108,9 @@ def run_proportion_meta_analysis(
     rate_col : column name for proportion (delivery rate, 0-1)
     n_col : column name for sample sizes (denominators)
     label_col : column name for site labels
-    method : tau-squared estimator
+    method : tau-squared estimator ('reml' recommended, 'dl' for sensitivity)
+    use_hksj : bool
+        Apply Hartung-Knapp-Sidik-Jonkman CI adjustment (recommended for k < 20)
 
     Returns
     -------
@@ -122,8 +148,18 @@ def run_proportion_meta_analysis(
     # Add pooled row — eff_re is a scalar float, not an object
     pooled_logit = res.eff_re
     pooled_ci = res.conf_int_re()
+
+    # Apply HKSJ adjustment if requested and k >= 3
+    k = len(logit_p)
+    ci_method = f"RE ({method})"
+    if use_hksj and k >= 3:
+        tau2 = getattr(res, "tau2", 0.0)
+        se_hksj, t_crit = _hksj_adjustment(logit_p, se_logit ** 2, pooled_logit, tau2, k)
+        pooled_ci = (pooled_logit - t_crit * se_hksj, pooled_logit + t_crit * se_hksj)
+        ci_method = f"RE ({method}) + HKSJ"
+
     pooled = {
-        "label": "Pooled (RE)",
+        "label": f"Pooled ({ci_method})",
         "eff": pooled_logit,
         "sd_eff": res.sd_eff_re if hasattr(res, "sd_eff_re") else np.nan,
         "ci_low": pooled_ci[0],
@@ -166,7 +202,8 @@ def run_meta_analysis(
     estimate_col: str,
     se_col: str,
     label_col: str = "site_name",
-    method: str = "dl",
+    method: str = "reml",
+    use_hksj: bool = True,
 ):
     """Run fixed + random-effects meta-analysis on site-level estimates.
 
@@ -176,7 +213,9 @@ def run_meta_analysis(
     estimate_col : column name for effect estimates
     se_col : column name for standard errors
     label_col : column name for site labels
-    method : tau-squared estimator ('dl' = DerSimonian-Laird, 'pm' = Paule-Mandel)
+    method : tau-squared estimator ('reml' recommended, 'dl' for sensitivity)
+    use_hksj : bool
+        Apply HKSJ CI adjustment (recommended for k < 20; IntHout et al. 2014)
 
     Returns
     -------
@@ -203,13 +242,23 @@ def run_meta_analysis(
         if "sd_eff" not in summary.columns and len(summary.columns) > 2:
             summary = summary.rename(columns={summary.columns[2]: "sd_eff"})
 
-    # Add pooled row — eff_re is a scalar float
+    pooled_eff = res.eff_re
+    pooled_ci = res.conf_int_re()
+    k = len(eff)
+    ci_method = f"RE ({method})"
+
+    if use_hksj and k >= 3:
+        tau2 = getattr(res, "tau2", 0.0)
+        se_hksj, t_crit = _hksj_adjustment(eff, var, pooled_eff, tau2, k)
+        pooled_ci = (pooled_eff - t_crit * se_hksj, pooled_eff + t_crit * se_hksj)
+        ci_method = f"RE ({method}) + HKSJ"
+
     pooled = {
-        "label": "Pooled (RE)",
-        "eff": res.eff_re,
+        "label": f"Pooled ({ci_method})",
+        "eff": pooled_eff,
         "sd_eff": res.sd_eff_re if hasattr(res, "sd_eff_re") else np.nan,
-        "ci_low": res.conf_int_re()[0],
-        "ci_upp": res.conf_int_re()[1],
+        "ci_low": pooled_ci[0],
+        "ci_upp": pooled_ci[1],
         "w_fe": np.nan,
         "w_re": np.nan,
         "z": np.nan,

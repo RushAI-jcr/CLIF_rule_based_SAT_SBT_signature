@@ -527,21 +527,33 @@ def fit_mortality_model(day_level_df):
         from statsmodels.genmod.families import Binomial
         from statsmodels.genmod.cov_struct import Exchangeable
 
+        cov_struct = Exchangeable()
         gee = GEE(y, X, groups=model_df["hospital_id"],
-                   family=Binomial(), cov_struct=Exchangeable())
-        gee_result = gee.fit()
+                   family=Binomial(), cov_struct=cov_struct)
+        # cov_type="robust" ensures sandwich (empirical) standard errors
+        gee_result = gee.fit(cov_type="robust")
         params = gee_result.params
         conf = gee_result.conf_int()
         pvals = gee_result.pvalues
         idx = covariates.index("ever_delivered") + 1
 
+        # Extract estimated working correlation for reporting
+        try:
+            dep_params = gee_result.cov_struct.summary()
+            working_corr = str(dep_params)
+        except Exception:
+            working_corr = "unavailable"
+
         result = {
-            "model": "GEE Logistic - In-Hospital Mortality (hospital-clustered)",
+            "model": "GEE Logistic - In-Hospital Mortality (hospital-clustered, robust SE)",
             "exposure": "SAT/SBT Delivery (ever)",
             "OR": round(np.exp(params.iloc[idx]), 3),
             "OR_lower_95": round(np.exp(conf.iloc[idx, 0]), 3),
             "OR_upper_95": round(np.exp(conf.iloc[idx, 1]), 3),
             "p_value": round(pvals.iloc[idx], 4),
+            "se_type": "robust (sandwich)",
+            "working_correlation": working_corr,
+            "n_clusters": int(model_df["hospital_id"].nunique()),
         }
     except Exception as e:
         print(f"GEE mortality model failed ({e}), falling back to plain logistic")
@@ -628,16 +640,17 @@ def _placeholder_result(model_name):
 
 
 def apply_multiplicity_correction(results_df, p_col="p_value", method="fdr_bh"):
-    """Apply multiplicity correction to p-values across definitions.
+    """Apply multiplicity correction to p-values.
 
-    With 6 SAT definitions + 3 SBT definitions tested across 4 outcome models,
-    the family-wise error rate inflates substantially. This applies Benjamini-Hochberg
-    FDR correction (default) or Bonferroni as specified.
+    Two correction scopes (both reported per Benjamini & Hochberg, 1995):
+    1. Global: across ALL tests (definitions x models) — most conservative
+    2. Per-model: within each outcome model separately — accounts for
+       correlated hypotheses within the same outcome
 
     Parameters
     ----------
     results_df : pd.DataFrame
-        Results with a p-value column
+        Results with a p-value column and 'model' column
     p_col : str
         Column containing p-values
     method : str
@@ -645,7 +658,7 @@ def apply_multiplicity_correction(results_df, p_col="p_value", method="fdr_bh"):
 
     Returns
     -------
-    pd.DataFrame with additional 'p_adjusted' and 'significant_adjusted' columns
+    pd.DataFrame with 'p_adj_global', 'p_adj_per_model', and significance columns
     """
     from statsmodels.stats.multitest import multipletests
 
@@ -653,22 +666,37 @@ def apply_multiplicity_correction(results_df, p_col="p_value", method="fdr_bh"):
     valid = df[p_col].notna()
     pvals = df.loc[valid, p_col].values
 
+    # Initialize output columns
+    for col in ["p_adj_global", "sig_global", "p_adj_per_model", "sig_per_model"]:
+        df[col] = np.nan if "p_" in col else False
+
     if len(pvals) == 0:
-        df["p_adjusted"] = np.nan
-        df["significant_adjusted"] = False
         return df
 
-    reject, p_adj, _, _ = multipletests(pvals, alpha=0.05, method=method)
-    df.loc[valid, "p_adjusted"] = p_adj
-    df.loc[valid, "significant_adjusted"] = reject
-    df.loc[~valid, "p_adjusted"] = np.nan
-    df.loc[~valid, "significant_adjusted"] = False
+    # 1. Global correction across all tests
+    reject_g, p_adj_g, _, _ = multipletests(pvals, alpha=0.05, method=method)
+    df.loc[valid, "p_adj_global"] = p_adj_g
+    df.loc[valid, "sig_global"] = reject_g
 
     n_tests = len(pvals)
     n_reject_raw = (pvals < 0.05).sum()
-    n_reject_adj = reject.sum()
-    print(f"Multiplicity correction ({method}): {n_tests} tests, "
-          f"{n_reject_raw} significant raw -> {n_reject_adj} significant adjusted")
+    n_reject_g = reject_g.sum()
+    print(f"Global {method}: {n_tests} tests, "
+          f"{n_reject_raw} sig raw -> {n_reject_g} sig adjusted")
+
+    # 2. Per-model correction (within each outcome model)
+    if "model" in df.columns:
+        for model_name, grp in df[valid].groupby("model"):
+            grp_pvals = grp[p_col].values
+            if len(grp_pvals) < 2:
+                df.loc[grp.index, "p_adj_per_model"] = grp_pvals
+                df.loc[grp.index, "sig_per_model"] = grp_pvals < 0.05
+                continue
+            reject_m, p_adj_m, _, _ = multipletests(grp_pvals, alpha=0.05, method=method)
+            df.loc[grp.index, "p_adj_per_model"] = p_adj_m
+            df.loc[grp.index, "sig_per_model"] = reject_m
+            print(f"  Per-model {method} [{model_name}]: {len(grp_pvals)} tests, "
+                  f"{(grp_pvals < 0.05).sum()} sig raw -> {reject_m.sum()} sig adjusted")
 
     return df
 
