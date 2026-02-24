@@ -187,6 +187,13 @@ def _build_cox_tv_dataset(day_level_df):
     hosp_info["sex_male"] = (hosp_info["sex"].str.lower() == "male").astype(int)
     hosp_info["race_white"] = (hosp_info["race"].str.lower().str.contains("white", na=False)).astype(int)
 
+    # Capture hospital_id at hospitalization level for frailty approximation
+    if "hospital_id" in day_level_df.columns:
+        hosp_info = hosp_info.merge(
+            day_level_df.groupby("hospitalization_id")["hospital_id"].first().reset_index(),
+            on="hospitalization_id", how="left",
+        )
+
     tv_cols = ["hospitalization_id", "hosp_id_day_key", "delivery"]
     for c in ["fio2_set", "peep_set", "on_vasopressor", "on_sedation", "rass"]:
         if c in day_level_df.columns:
@@ -198,8 +205,11 @@ def _build_cox_tv_dataset(day_level_df):
     tv["start"] = tv["day_idx"]
     tv["stop"] = tv["day_idx"] + 1
 
-    tv = tv.merge(hosp_info[["hospitalization_id", "age", "sex_male", "race_white",
-                              "died", "total_vent_days"]], on="hospitalization_id", how="left")
+    merge_cols = ["hospitalization_id", "age", "sex_male", "race_white",
+                  "died", "total_vent_days"]
+    if "hospital_id" in hosp_info.columns:
+        merge_cols.append("hospital_id")
+    tv = tv.merge(hosp_info[merge_cols], on="hospitalization_id", how="left")
 
     # Event indicators on last interval only
     tv["is_last"] = tv.groupby("hospitalization_id")["stop"].transform("max") == tv["stop"]
@@ -216,7 +226,10 @@ def _build_cox_tv_dataset(day_level_df):
 
     keep = ["hospitalization_id", "start", "stop",
             "event_extubation", "event_death"] + covariates
-    model_df = tv[keep].dropna()
+    if "hospital_id" in tv.columns:
+        keep.append("hospital_id")
+    model_df = tv[keep].dropna(subset=["hospitalization_id", "start", "stop",
+                                        "event_extubation", "event_death"] + covariates)
     return model_df, covariates
 
 
@@ -224,22 +237,50 @@ def _fit_cause_specific_cox(model_df, covariates, event_col, model_label):
     """Fit a single cause-specific Cox model for the given event column.
 
     For the competing cause, events are censored (set to 0).
+    Hospital frailty is approximated by including top-N-1 hospital indicator
+    variables as fixed effects (only when <= 50 hospitals are present) and
+    using penalizer=0.1 for L2 regularisation.
+
     Returns dict with HR, 95% CI, p-value for delivered_cummax.
     """
     from lifelines import CoxTimeVaryingFitter
 
-    fit_df = model_df[["hospitalization_id", "start", "stop", event_col] + covariates].copy()
+    active_covariates = list(covariates)
+
+    # --- Hospital frailty approximation -----------------------------------
+    hospital_dummies_added: list[str] = []
+    n_hospitals = 0
+    if "hospital_id" in model_df.columns:
+        n_hospitals = model_df["hospital_id"].nunique()
+        if 1 < n_hospitals <= 50:
+            # One-hot encode hospitals, drop the most frequent (reference)
+            hosp_dummies = pd.get_dummies(
+                model_df["hospital_id"], prefix="hosp", drop_first=True, dtype=int
+            )
+            hospital_dummies_added = hosp_dummies.columns.tolist()
+            model_df = pd.concat([model_df.reset_index(drop=True),
+                                   hosp_dummies.reset_index(drop=True)], axis=1)
+            active_covariates = active_covariates + hospital_dummies_added
+
+    fit_cols = ["hospitalization_id", "start", "stop", event_col] + active_covariates
+    fit_df = model_df[fit_cols].copy()
     fit_df = fit_df.rename(columns={event_col: "event"})
 
     if fit_df["event"].sum() < 5:
         return _placeholder_result(f"{model_label} (too few events)")
 
-    ctv = CoxTimeVaryingFitter()
+    # penalizer=0.1 adds L2 regularisation; helps convergence with hospital dummies
+    ctv = CoxTimeVaryingFitter(penalizer=0.1)
     ctv.fit(fit_df, id_col="hospitalization_id",
             start_col="start", stop_col="stop", event_col="event")
 
     summary = ctv.summary
-    result = {"model": model_label, "exposure": "SAT/SBT Delivery (time-varying)"}
+    result = {
+        "model": model_label,
+        "exposure": "SAT/SBT Delivery (time-varying)",
+        "n_hospital_dummies": len(hospital_dummies_added),
+        "n_hospitals": n_hospitals,
+    }
     if "delivered_cummax" in summary.index:
         row = summary.loc["delivered_cummax"]
         result["HR"] = round(np.exp(row["coef"]), 3)
@@ -451,31 +492,64 @@ def fit_icu_los_model(day_level_df):
         if c in hosp.columns and hosp[c].notna().sum() > len(hosp) * 0.3:
             hosp[c] = hosp[c].fillna(hosp[c].median())
             covariates.append(c)
-    model_df = hosp[covariates + ["icu_los"]].dropna()
+    model_df = hosp[covariates + ["icu_los", "hospital_id"]].dropna()
 
     X = sm.add_constant(model_df[covariates])
     y = model_df["icu_los"].astype(int)
 
     try:
-        nb = sm.NegativeBinomial(y, X, loglike_method="nb2").fit(
-            disp=False, maxiter=300
-        )
-        params = nb.params
-        conf = nb.conf_int()
-        pvals = nb.pvalues
+        # GEE with negative binomial family, exchangeable correlation,
+        # clustered on hospital_id — mirrors fit_mortality_model approach.
+        from statsmodels.genmod.generalized_estimating_equations import GEE
+        from statsmodels.genmod.families import NegativeBinomial as NBFamily
+        from statsmodels.genmod.cov_struct import Exchangeable
+
+        cov_struct = Exchangeable()
+        gee = GEE(y, X, groups=model_df["hospital_id"],
+                  family=NBFamily(), cov_struct=cov_struct)
+        gee_result = gee.fit(cov_type="robust")
+        params = gee_result.params
+        conf = gee_result.conf_int()
+        pvals = gee_result.pvalues
         idx = covariates.index("ever_delivered") + 1
 
+        try:
+            working_corr = str(gee_result.cov_struct.summary())
+        except Exception:
+            working_corr = "unavailable"
+
         result = {
-            "model": "NB - ICU LOS",
+            "model": "GEE NB - ICU LOS (hospital-clustered, robust SE)",
             "exposure": "SAT/SBT Delivery (ever)",
             "IRR": round(np.exp(params.iloc[idx]), 3),
             "IRR_lower_95": round(np.exp(conf.iloc[idx, 0]), 3),
             "IRR_upper_95": round(np.exp(conf.iloc[idx, 1]), 3),
             "p_value": round(pvals.iloc[idx], 4),
+            "se_type": "robust (sandwich)",
+            "working_correlation": working_corr,
+            "n_clusters": int(model_df["hospital_id"].nunique()),
         }
     except Exception as e:
-        print(f"ICU LOS model failed: {e}")
-        result = _placeholder_result("NB - ICU LOS")
+        print(f"GEE NB ICU LOS model failed ({e}), falling back to plain NegativeBinomial")
+        try:
+            nb = sm.NegativeBinomial(y, X, loglike_method="nb2").fit(
+                disp=False, maxiter=300
+            )
+            params = nb.params
+            conf = nb.conf_int()
+            pvals = nb.pvalues
+            idx = covariates.index("ever_delivered") + 1
+            result = {
+                "model": "NB - ICU LOS (no clustering - fallback)",
+                "exposure": "SAT/SBT Delivery (ever)",
+                "IRR": round(np.exp(params.iloc[idx]), 3),
+                "IRR_lower_95": round(np.exp(conf.iloc[idx, 0]), 3),
+                "IRR_upper_95": round(np.exp(conf.iloc[idx, 1]), 3),
+                "p_value": round(pvals.iloc[idx], 4),
+            }
+        except Exception as e2:
+            print(f"Fallback NB also failed: {e2}")
+            result = _placeholder_result("NB - ICU LOS")
     return result
 
 
@@ -574,6 +648,155 @@ def fit_mortality_model(day_level_df):
         except Exception as e2:
             print(f"Fallback logistic also failed: {e2}")
             result = _placeholder_result("Logistic - Mortality")
+    return result
+
+
+# ============================================================
+# MODEL 5: AWAKENING OUTCOME (SAT-specific)
+# ============================================================
+
+def fit_awakening_model(day_level_df):
+    """GEE logistic regression for RASS improvement after SAT delivery.
+
+    Definition of "awakening":
+      - Restricted to days where SAT was delivered (delivery == 1) AND
+        baseline RASS <= -2 (patient is deeply sedated at start of the day).
+      - Outcome (binary): RASS improves to >= -1 within the same ventilator-day.
+
+    The analysis is at the ventilator-day level.  A patient can contribute
+    multiple days (each day is a separate observation).  GEE with an
+    exchangeable working correlation structure clustered on hospital_id
+    accounts for within-hospital correlation; robust sandwich SEs account
+    for within-patient correlation.
+
+    Returns dict with OR, 95% CI, p-value for the delivery effect.
+    (All observations have delivery==1 by design; the delivery covariate is
+    therefore not meaningful here — the relevant comparison is the proportion
+    of days that achieve awakening, adjusted for covariates.)
+
+    Note: Because all selected days have delivery==1, the delivery indicator
+    is dropped and the intercept represents the adjusted awakening probability.
+    Covariates capture patient-level heterogeneity.
+    """
+    try:
+        import statsmodels.api as sm
+        from statsmodels.genmod.generalized_estimating_equations import GEE
+        from statsmodels.genmod.families import Binomial
+        from statsmodels.genmod.cov_struct import Exchangeable
+    except ImportError:
+        return _placeholder_result("GEE Logistic - SAT Awakening")
+
+    # Require RASS column
+    if "rass" not in day_level_df.columns:
+        print("fit_awakening_model: 'rass' column not found — skipping.")
+        return _placeholder_result("GEE Logistic - SAT Awakening (no RASS data)")
+
+    # Restrict to SAT-delivered days where patient starts deeply sedated
+    awake_df = day_level_df[
+        (day_level_df["delivery"] == 1) &
+        (day_level_df["rass"] <= -2)
+    ].copy()
+
+    if len(awake_df) < 20:
+        print(f"fit_awakening_model: only {len(awake_df)} eligible days — skipping.")
+        return _placeholder_result("GEE Logistic - SAT Awakening (too few observations)")
+
+    # Outcome: did RASS improve to >= -1 on this day?
+    # Because rass is the median per vent-day, we check whether the maximum
+    # RASS recorded on that day (stored in the source df) reached >= -1.
+    # If only median is available, use it as a conservative proxy.
+    if "rass_max" in day_level_df.columns:
+        rass_peak_col = "rass_max"
+        awake_df["rass_peak"] = awake_df["rass_max"]
+    else:
+        # Fallback: use same aggregated rass column (median-based)
+        rass_peak_col = "rass"
+        awake_df["rass_peak"] = awake_df["rass"]
+
+    awake_df["awakened"] = (awake_df["rass_peak"] >= -1).astype(int)
+
+    # Baseline covariates
+    awake_df["sex_male"] = (
+        awake_df["sex_category"].str.lower() == "male"
+    ).astype(int)
+    awake_df["race_white"] = (
+        awake_df["race_category"].str.lower().str.contains("white", na=False)
+    ).astype(int)
+
+    covariates = ["age_at_admission", "sex_male", "race_white"]
+    for c in ["fio2_set", "peep_set", "on_vasopressor", "on_sedation"]:
+        if c in awake_df.columns and awake_df[c].notna().sum() > len(awake_df) * 0.3:
+            awake_df[c] = awake_df[c].fillna(awake_df[c].median())
+            covariates.append(c)
+
+    required_cols = covariates + ["awakened", "hospital_id"]
+    model_df = awake_df[required_cols].dropna()
+
+    if len(model_df) < 20 or model_df["awakened"].nunique() < 2:
+        return _placeholder_result(
+            "GEE Logistic - SAT Awakening (insufficient outcome variance)"
+        )
+
+    X = sm.add_constant(model_df[covariates])
+    y = model_df["awakened"].astype(int)
+
+    result: dict = {
+        "model": "GEE Logistic - SAT Awakening (hospital-clustered, robust SE)",
+        "exposure": "SAT delivery day with baseline RASS <= -2",
+        "outcome": "RASS improvement to >= -1",
+        "n_days": int(len(model_df)),
+        "n_awakened": int(y.sum()),
+        "rass_peak_col_used": rass_peak_col,
+    }
+
+    try:
+        cov_struct = Exchangeable()
+        gee = GEE(y, X, groups=model_df["hospital_id"],
+                  family=Binomial(), cov_struct=cov_struct)
+        gee_result = gee.fit(cov_type="robust")
+
+        params = gee_result.params
+        conf = gee_result.conf_int()
+        pvals = gee_result.pvalues
+
+        # Report the intercept as adjusted awakening log-odds, plus all covariates
+        coef_series = params
+        result["coef_table"] = {
+            name: {
+                "OR": round(float(np.exp(coef_series[name])), 3),
+                "OR_lower_95": round(float(np.exp(conf.loc[name, 0])), 3),
+                "OR_upper_95": round(float(np.exp(conf.loc[name, 1])), 3),
+                "p_value": round(float(pvals[name]), 4),
+            }
+            for name in coef_series.index
+        }
+
+        # Primary summary: intercept = adjusted awakening probability
+        intercept_logodds = float(coef_series["const"])
+        result["adjusted_awakening_prob"] = round(
+            1 / (1 + np.exp(-intercept_logodds)), 3
+        )
+
+        try:
+            result["working_correlation"] = str(gee_result.cov_struct.summary())
+        except Exception:
+            result["working_correlation"] = "unavailable"
+
+        result["n_clusters"] = int(model_df["hospital_id"].nunique())
+
+    except Exception as e:
+        print(f"GEE awakening model failed ({e}), falling back to plain logistic")
+        try:
+            logit = sm.Logit(y, X).fit(disp=False, maxiter=300)
+            result["model"] = "Logistic - SAT Awakening (no clustering - fallback)"
+            result["adjusted_awakening_prob"] = round(
+                float(logit.predict(X).mean()), 3
+            )
+            result["note"] = f"GEE failed: {e}"
+        except Exception as e2:
+            print(f"Fallback logistic also failed: {e2}")
+            result.update(_placeholder_result("GEE Logistic - SAT Awakening"))
+
     return result
 
 
@@ -747,13 +970,17 @@ def run_all_models(sat_file, sbt_file, output_dir):
             n_delivered = day_df.groupby("hospitalization_id")["delivery"].max().sum()
             print(f"  Hospitalizations: {n_hosp}, with delivery: {int(n_delivered)}")
 
-            # Fit models
-            for model_fn in [
+            # Fit models — awakening is SAT-specific (RASS improvement after sedation hold)
+            model_fns = [
                 fit_cox_extubation,
                 fit_vfd_model,
                 fit_icu_los_model,
                 fit_mortality_model,
-            ]:
+            ]
+            if label == "SAT":
+                model_fns.append(fit_awakening_model)
+
+            for model_fn in model_fns:
                 try:
                     result = model_fn(day_df)
                     # Extract nested competing-risk death result if present

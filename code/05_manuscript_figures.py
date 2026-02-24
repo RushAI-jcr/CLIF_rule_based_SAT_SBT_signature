@@ -382,98 +382,225 @@ def _figure3_template(output_path):
 def figure4_timing_pairing(data_dir, output_path):
     """Distribution of first eligible/delivered day + paired SAT+SBT proportion.
 
-    Reads final_df_SAT.csv and final_df_SBT.csv (or study_cohort.parquet).
+    Layout (2x3 GridSpec):
+      Row 0 col 0: A - SAT first eligible day
+      Row 0 col 1: B - SAT first delivered day
+      Row 1 col 0: C - SBT first eligible day
+      Row 1 col 1: D - SBT first delivered day
+      Rows 0-1 col 2: E - Paired SAT+SBT pie chart (rowspan)
+
+    Reads final_df_SAT.csv and final_df_SBT.csv.
+    SAT color: #2166AC (blue). SBT color: #D4380D (orange-red).
     """
+    import matplotlib.gridspec as gridspec
+
     sat_path = os.path.join(data_dir, "final_df_SAT.csv")
     sbt_path = os.path.join(data_dir, "final_df_SBT.csv")
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    # ------------------------------------------------------------------ #
+    # Figure canvas: wide enough for 2 histogram columns + 1 pie column  #
+    # ------------------------------------------------------------------ #
+    fig = plt.figure(figsize=(15, 8))
+    gs = gridspec.GridSpec(
+        2, 3,
+        figure=fig,
+        hspace=0.45,   # vertical gap between rows
+        wspace=0.35,   # horizontal gap between columns
+        width_ratios=[1, 1, 1],
+    )
 
-    if os.path.exists(sat_path):
-        sat_df = pd.read_csv(sat_path, low_memory=False)
-        sat_df["event_time"] = pd.to_datetime(sat_df.get("event_time"), format="mixed")
+    ax_a = fig.add_subplot(gs[0, 0])   # SAT eligible
+    ax_b = fig.add_subplot(gs[0, 1])   # SAT delivered
+    ax_c = fig.add_subplot(gs[1, 0])   # SBT eligible
+    ax_d = fig.add_subplot(gs[1, 1])   # SBT delivered
+    ax_e = fig.add_subplot(gs[:, 2])   # Pie (both rows, col 2)
 
-        # Panel A: Distribution of first eligible day
-        ax = axes[0]
-        if "day_number" in sat_df.columns and "eligible_event" in sat_df.columns:
-            first_elig = sat_df[sat_df["eligible_event"] == 1].groupby(
-                "hospitalization_id"
-            )["day_number"].min()
-            bins = range(0, min(int(first_elig.max()) + 2, 30))
-            ax.hist(first_elig, bins=bins, color="#2166AC", edgecolor="white",
-                    alpha=0.8)
-            ax.set_xlabel("IMV day of first eligibility", fontsize=9)
-            ax.set_ylabel("Hospitalizations, n", fontsize=9)
-            ax.set_title("First eligible day", fontsize=11, fontweight="bold")
+    SAT_BLUE  = "#2166AC"
+    SBT_RED   = "#D4380D"
+    MAX_DAY   = 30   # x-axis cap for histograms
+
+    # ------------------------------------------------------------------ #
+    # Helper: build histogram bins and plot                               #
+    # ------------------------------------------------------------------ #
+    def _hist(ax, series, color, xlabel, title, panel_label):
+        """Plot a histogram of ICU day numbers, capped at MAX_DAY."""
+        if series is not None and len(series) > 0:
+            max_bin = min(int(series.max()) + 2, MAX_DAY)
+            bins = range(0, max_bin)
+            ax.hist(series, bins=bins, color=color, edgecolor="white", alpha=0.85)
         else:
             ax.text(0.5, 0.5, "[Data pending]", ha="center", va="center",
-                    fontsize=10, transform=ax.transAxes)
-            ax.set_title("First eligible day", fontsize=11, fontweight="bold")
-    else:
-        axes[0].text(0.5, 0.5, "[SAT data not found]", ha="center", va="center",
-                     fontsize=10, transform=axes[0].transAxes)
+                    fontsize=9, transform=ax.transAxes)
+        ax.set_xlabel(xlabel, fontsize=9)
+        ax.set_ylabel("Hospitalizations, n", fontsize=9)
+        ax.set_title(
+            f"{panel_label}. {title}",
+            fontsize=11, fontweight="bold", pad=6,
+        )
+        ax.tick_params(labelsize=8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
 
-    # Panel B: First delivery day
-    ax = axes[1]
+    # ------------------------------------------------------------------ #
+    # Load SAT data                                                       #
+    # ------------------------------------------------------------------ #
+    sat_df = None
     if os.path.exists(sat_path):
-        if "SAT_EHR_delivery" in sat_df.columns and "day_number" in sat_df.columns:
-            first_deliv = sat_df[sat_df["SAT_EHR_delivery"] == 1].groupby(
-                "hospitalization_id"
-            )["day_number"].min()
-            if len(first_deliv) > 0:
-                bins = range(0, min(int(first_deliv.max()) + 2, 30))
-                ax.hist(first_deliv, bins=bins, color="#B2182B", edgecolor="white",
-                        alpha=0.8)
-    ax.set_xlabel("IMV day of first delivery", fontsize=9)
-    ax.set_ylabel("Hospitalizations, n", fontsize=9)
-    ax.set_title("First delivered day", fontsize=11, fontweight="bold")
+        sat_df = pd.read_csv(sat_path, low_memory=False)
 
-    # Panel C: Paired SAT+SBT on same day
-    ax = axes[2]
-    if os.path.exists(sat_path) and os.path.exists(sbt_path):
+    # Panel A: SAT first eligible day
+    sat_first_elig = None
+    if sat_df is not None and "day_number" in sat_df.columns and "eligible_event" in sat_df.columns:
+        sat_first_elig = (
+            sat_df[sat_df["eligible_event"] == 1]
+            .groupby("hospitalization_id")["day_number"]
+            .min()
+        )
+    _hist(
+        ax_a, sat_first_elig, SAT_BLUE,
+        xlabel="IMV day of first eligibility",
+        title="SAT first eligible day",
+        panel_label="A",
+    )
+
+    # Panel B: SAT first delivered day
+    sat_first_deliv = None
+    if sat_df is not None and "SAT_EHR_delivery" in sat_df.columns and "day_number" in sat_df.columns:
+        sat_first_deliv = (
+            sat_df[sat_df["SAT_EHR_delivery"] == 1]
+            .groupby("hospitalization_id")["day_number"]
+            .min()
+        )
+    _hist(
+        ax_b, sat_first_deliv, SAT_BLUE,
+        xlabel="IMV day of first delivery",
+        title="SAT first delivered day",
+        panel_label="B",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Load SBT data                                                       #
+    # ------------------------------------------------------------------ #
+    sbt_df = None
+    if os.path.exists(sbt_path):
         sbt_df = pd.read_csv(sbt_path, low_memory=False)
 
-        # Find days with SAT delivery
-        sat_days = set()
-        for dcol in ["SAT_EHR_delivery", "SAT_modified_delivery"]:
-            if dcol in sat_df.columns:
-                sat_days.update(
-                    sat_df[sat_df[dcol] == 1]["hosp_id_day_key"].unique()
-                )
+    # Panel C: SBT first eligible day
+    sbt_first_elig = None
+    if sbt_df is not None and "day_number" in sbt_df.columns and "eligible_day" in sbt_df.columns:
+        sbt_first_elig = (
+            sbt_df[sbt_df["eligible_day"] == 1]
+            .groupby("hospitalization_id")["day_number"]
+            .min()
+        )
+    _hist(
+        ax_c, sbt_first_elig, SBT_RED,
+        xlabel="IMV day of first eligibility",
+        title="SBT first eligible day",
+        panel_label="C",
+    )
 
-        # Find days with SBT delivery
-        sbt_days = set()
+    # Panel D: SBT first delivered day
+    # Prefer EHR_Delivery_2mins; fall back to 5-min then 30-min thresholds.
+    sbt_first_deliv = None
+    if sbt_df is not None and "day_number" in sbt_df.columns:
         for dcol in ["EHR_Delivery_2mins", "EHR_Delivery_5mins", "EHR_Delivery_30mins"]:
             if dcol in sbt_df.columns:
-                sbt_days.update(
-                    sbt_df[sbt_df[dcol] == 1]["hosp_id_day_key"].unique()
+                candidate = (
+                    sbt_df[sbt_df[dcol] == 1]
+                    .groupby("hospitalization_id")["day_number"]
+                    .min()
+                )
+                if len(candidate) > 0:
+                    sbt_first_deliv = candidate
+                    break
+    _hist(
+        ax_d, sbt_first_deliv, SBT_RED,
+        xlabel="IMV day of first delivery",
+        title="SBT first delivered day",
+        panel_label="D",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Panel E: Paired SAT+SBT pie chart                                  #
+    # ------------------------------------------------------------------ #
+    ax_e.set_title("E. Paired SAT + SBT", fontsize=11, fontweight="bold", pad=6)
+
+    if sat_df is not None and sbt_df is not None:
+        # Collect SAT delivery day-keys
+        sat_days: set = set()
+        for dcol in ["SAT_EHR_delivery", "SAT_modified_delivery"]:
+            if dcol in sat_df.columns and "hosp_id_day_key" in sat_df.columns:
+                sat_days.update(
+                    sat_df.loc[sat_df[dcol] == 1, "hosp_id_day_key"].unique()
                 )
 
-        paired = sat_days & sbt_days
+        # Collect SBT delivery day-keys
+        sbt_days: set = set()
+        for dcol in ["EHR_Delivery_2mins", "EHR_Delivery_5mins", "EHR_Delivery_30mins"]:
+            if dcol in sbt_df.columns and "hosp_id_day_key" in sbt_df.columns:
+                sbt_days.update(
+                    sbt_df.loc[sbt_df[dcol] == 1, "hosp_id_day_key"].unique()
+                )
+
+        paired   = sat_days & sbt_days
         sat_only = sat_days - sbt_days
         sbt_only = sbt_days - sat_days
-
-        counts = [len(paired), len(sat_only), len(sbt_only)]
+        counts   = [len(paired), len(sat_only), len(sbt_only)]
         labels_pie = ["SAT + SBT\n(same day)", "SAT only", "SBT only"]
-        colors = ["#2166AC", "#92C5DE", "#F4A582"]
+        pie_colors = ["#4393C3", "#92C5DE", "#F4A582"]
 
         if sum(counts) > 0:
-            wedges, texts, autotexts = ax.pie(
-                counts, labels=labels_pie, colors=colors,
-                autopct="%1.1f%%", startangle=90,
+            wedges, texts, autotexts = ax_e.pie(
+                counts,
+                labels=None,          # labels placed in legend below
+                colors=pie_colors,
+                autopct="%1.1f%%",
+                startangle=90,
+                pctdistance=0.75,
                 textprops={"fontsize": 8},
             )
             for t in autotexts:
                 t.set_fontsize(8)
-        else:
-            ax.text(0.5, 0.5, "[No delivery data]", ha="center", va="center",
-                    fontsize=10, transform=ax.transAxes)
-    else:
-        ax.text(0.5, 0.5, "[Data pending]", ha="center", va="center",
-                fontsize=10, transform=ax.transAxes)
-    ax.set_title("Paired SAT + SBT", fontsize=11, fontweight="bold")
 
-    plt.tight_layout()
+            # Legend below the pie to avoid overlap
+            legend_labels = [
+                f"{lbl}\n(n = {c:,})"
+                for lbl, c in zip(labels_pie, counts)
+            ]
+            ax_e.legend(
+                wedges, legend_labels,
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.06),
+                fontsize=8,
+                frameon=False,
+                ncol=1,
+            )
+        else:
+            ax_e.text(0.5, 0.5, "[No delivery data]", ha="center", va="center",
+                      fontsize=9, transform=ax_e.transAxes)
+    else:
+        ax_e.text(0.5, 0.5, "[Data pending]", ha="center", va="center",
+                  fontsize=9, transform=ax_e.transAxes)
+
+    # ------------------------------------------------------------------ #
+    # Add a subtle horizontal rule between SAT / SBT rows for clarity    #
+    # ------------------------------------------------------------------ #
+    for ax in (ax_a, ax_b, ax_c, ax_d):
+        ax.tick_params(axis="both", labelsize=8)
+
+    # Row labels in the figure margin (outside axes)
+    fig.text(
+        0.01, 0.73, "SAT", va="center", ha="left",
+        fontsize=9, fontweight="bold", color=SAT_BLUE,
+        rotation=90,
+    )
+    fig.text(
+        0.01, 0.27, "SBT", va="center", ha="left",
+        fontsize=9, fontweight="bold", color=SBT_RED,
+        rotation=90,
+    )
+
     fig.savefig(output_path, bbox_inches="tight", dpi=300)
     plt.close(fig)
     print(f"Figure 4 saved: {output_path}")

@@ -89,6 +89,170 @@ def _hksj_adjustment(eff, var_eff, pooled_eff, tau2, k):
     return se_hksj, t_crit
 
 
+def cluster_bootstrap_concordance(
+    day_level_df: pd.DataFrame,
+    ehr_col: str,
+    flowsheet_col: str,
+    cluster_col: str = "imv_episode_id",
+    n_boot: int = 1000,
+    seed: int = 42,
+) -> dict:
+    """Cluster-bootstrap concordance metrics with 95% percentile CIs.
+
+    Resamples clusters (ventilator episodes or hospitalizations) with
+    replacement to propagate within-cluster correlation into confidence
+    intervals.  Falls back to hospitalization_id, then row-level bootstrap
+    when the preferred cluster column is absent.
+
+    Parameters
+    ----------
+    day_level_df : DataFrame
+        One row per ventilator-episode-day (or similar grain).  Must contain
+        ``ehr_col`` and ``flowsheet_col`` as binary (0/1) columns.
+    ehr_col : str
+        Binary column for EHR-derived phenotype (reference).
+    flowsheet_col : str
+        Binary column for flowsheet-derived phenotype (comparator).
+    cluster_col : str
+        Primary cluster identifier column.  Falls back to
+        ``hospitalization_id``, then row-level bootstrap.
+    n_boot : int
+        Number of bootstrap iterations (default 1 000).
+    seed : int
+        Random seed for reproducibility (default 42).
+
+    Returns
+    -------
+    dict
+        Keys for each metric (``sensitivity``, ``specificity``, ``ppv``,
+        ``npv``, ``f1``, ``accuracy``, ``kappa``) each mapped to a sub-dict
+        with ``estimate``, ``ci_low`` (2.5th pct), and ``ci_high``
+        (97.5th pct).  Also contains top-level ``n_rows`` and
+        ``n_clusters`` for reporting.
+
+    Notes
+    -----
+    Both columns are coerced to int and rows where either value is NaN are
+    dropped before analysis.  Cohen's kappa uses the standard unweighted
+    formula.
+
+    Examples
+    --------
+    >>> result = cluster_bootstrap_concordance(df, "EHR_flag", "flowsheet_flag")
+    >>> result["sensitivity"]["estimate"]
+    0.872
+    >>> result["sensitivity"]["ci_low"], result["sensitivity"]["ci_high"]
+    (0.851, 0.891)
+    """
+    rng = np.random.default_rng(seed)
+
+    # --- Validate and clean ------------------------------------------------
+    needed = [ehr_col, flowsheet_col]
+    missing = [c for c in needed if c not in day_level_df.columns]
+    if missing:
+        raise ValueError(f"cluster_bootstrap_concordance: missing columns {missing}")
+
+    df = day_level_df[[c for c in [cluster_col, "imv_episode_id",
+                                    "hospitalization_id", ehr_col, flowsheet_col]
+                        if c in day_level_df.columns]].copy()
+    df = df.dropna(subset=[ehr_col, flowsheet_col])
+    df[ehr_col] = df[ehr_col].astype(int)
+    df[flowsheet_col] = df[flowsheet_col].astype(int)
+
+    # Determine effective cluster column with fallback chain
+    if cluster_col in df.columns:
+        effective_cluster = cluster_col
+    elif "hospitalization_id" in df.columns:
+        effective_cluster = "hospitalization_id"
+        print(f"  cluster_bootstrap_concordance: '{cluster_col}' not found, "
+              "falling back to 'hospitalization_id'")
+    else:
+        effective_cluster = None
+        print("  cluster_bootstrap_concordance: no cluster column found, "
+              "using row-level bootstrap")
+
+    # --- Helper: compute all metrics from flat arrays ----------------------
+    def _metrics_from_arrays(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+        tp = int(((y_true == 1) & (y_pred == 1)).sum())
+        fp = int(((y_true == 0) & (y_pred == 1)).sum())
+        fn = int(((y_true == 1) & (y_pred == 0)).sum())
+        tn = int(((y_true == 0) & (y_pred == 0)).sum())
+        total = tp + fp + fn + tn
+
+        sens = tp / (tp + fn) if (tp + fn) else 0.0
+        spec = tn / (tn + fp) if (tn + fp) else 0.0
+        ppv  = tp / (tp + fp) if (tp + fp) else 0.0
+        npv  = tn / (tn + fn) if (tn + fn) else 0.0
+        f1   = (2 * ppv * sens / (ppv + sens)) if (ppv + sens) else 0.0
+        acc  = (tp + tn) / total if total else 0.0
+
+        # Cohen's kappa
+        p_obs = acc
+        p_yes = ((tp + fp) / total) * ((tp + fn) / total) if total else 0.0
+        p_no  = ((tn + fn) / total) * ((tn + fp) / total) if total else 0.0
+        p_exp = p_yes + p_no
+        kappa = (p_obs - p_exp) / (1 - p_exp) if (1 - p_exp) != 0 else 0.0
+
+        return {
+            "sensitivity": sens,
+            "specificity": spec,
+            "ppv": ppv,
+            "npv": npv,
+            "f1": f1,
+            "accuracy": acc,
+            "kappa": kappa,
+        }
+
+    # --- Point estimates on full data --------------------------------------
+    point = _metrics_from_arrays(df[ehr_col].values, df[flowsheet_col].values)
+
+    # --- Bootstrap ---------------------------------------------------------
+    boot_records: list[dict[str, float]] = []
+
+    if effective_cluster is not None:
+        clusters = df[effective_cluster].unique()
+        n_clusters = len(clusters)
+
+        for _ in range(n_boot):
+            sampled = rng.choice(clusters, size=n_clusters, replace=True)
+            # Reconstruct bootstrap sample from cluster draws
+            frames = [df[df[effective_cluster] == cid] for cid in sampled]
+            boot_df = pd.concat(frames, ignore_index=True)
+            boot_records.append(
+                _metrics_from_arrays(boot_df[ehr_col].values,
+                                     boot_df[flowsheet_col].values)
+            )
+    else:
+        # Row-level bootstrap fallback
+        n_clusters = len(df)
+        idx = np.arange(len(df))
+        for _ in range(n_boot):
+            sampled_idx = rng.choice(idx, size=len(df), replace=True)
+            boot_df = df.iloc[sampled_idx]
+            boot_records.append(
+                _metrics_from_arrays(boot_df[ehr_col].values,
+                                     boot_df[flowsheet_col].values)
+            )
+
+    boot_arr = {k: np.array([r[k] for r in boot_records])
+                for k in point}
+
+    # --- Assemble output ---------------------------------------------------
+    result: dict = {
+        "n_rows": len(df),
+        "n_clusters": n_clusters,
+        "cluster_col_used": effective_cluster or "row-level",
+    }
+    for metric, est in point.items():
+        result[metric] = {
+            "estimate": round(est, 4),
+            "ci_low":  round(float(np.percentile(boot_arr[metric], 2.5)), 4),
+            "ci_high": round(float(np.percentile(boot_arr[metric], 97.5)), 4),
+        }
+
+    return result
+
+
 def run_proportion_meta_analysis(
     sites_df: pd.DataFrame,
     rate_col: str,

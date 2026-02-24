@@ -145,33 +145,73 @@ def process_cohort_conditions(cohort, How ):
     return cohort
 
 
-def process_diagnostic_flip_sbt_optimized_v2(cohort):
+def process_diagnostic_flip_sbt_optimized_v2(
+    cohort,
+    duration_min: int = SBT_PRIMARY_DURATION_MIN,
+    ps_threshold: int = SBT_PS_MAX,
+    durations_min: Optional[list] = None,
+):
+    """Detect SBT delivery via diagnostic flip logic.
+
+    Parameters
+    ----------
+    cohort : pd.DataFrame
+        Eligible cohort DataFrame produced by ``process_cohort_conditions``.
+        Must contain ``eligible_day``, ``device_category``, ``location_category``,
+        ``mode_category``, ``mode_name``, ``pressure_support_set``, ``peep_set``,
+        ``IMV_Controlled_met_time``, ``hospitalization_id``, ``current_day``.
+    duration_min : int, optional
+        Primary sustained-flip duration in minutes. Default: ``SBT_PRIMARY_DURATION_MIN`` (2).
+        Controls which duration is tagged as the "primary" EHR delivery column and
+        used for ``first_flip_time`` / ``flip_skip_reason`` logic.
+    ps_threshold : int, optional
+        Maximum allowed pressure_support_set (cmH2O) for SBT candidate rows.
+        Default: ``SBT_PS_MAX`` (8). PEEP threshold remains fixed at 8 cmH2O
+        per the manuscript protocol.
+    durations_min : list of int, optional
+        List of durations (minutes) for which sustained-flip delivery columns are
+        computed. Defaults to ``[SBT_PRIMARY_DURATION_MIN, SBT_MODIFIED_DURATION_MIN, 30]``
+        (i.e., [2, 5, 30]). Each entry produces an ``EHR_Delivery_{d}mins`` column.
+        The first entry in the list is treated as the primary duration and drives
+        the ``first_flip_time`` / ``flip_skip_reason`` diagnostic columns.
+
+    Returns
+    -------
+    pd.DataFrame
+        ``cohort`` with SBT delivery columns and diagnostic columns added in place.
+    """
+    if durations_min is None:
+        durations_min = [SBT_PRIMARY_DURATION_MIN, SBT_MODIFIED_DURATION_MIN, 30]
+
+    # The primary duration for flip/skip diagnostics is the first entry
+    primary_duration = durations_min[0]
+
     # Ensure event_time is datetime.
     cohort['event_time'] = pd.to_datetime(cohort['event_time'])
-    
+
     # Preinitialize diagnostic and flip evaluation columns.
     diag_cols = ['cond_device_imv', 'cond_location_icu', 'cond_mode_ps_cpap',
                  'cond_ps_set_le8', 'cond_peep_set_le8', 'cond_mode_tpiece',
                  'flip_skip_reason', 'first_flip_time']
     for col in diag_cols:
         cohort[col] = None
-        
-    # Initialize EHR delivery columns.
-    for mins in [2, 5, 30]:
-        cohort[f"EHR_Delivery_{mins}mins"] = np.nan
+
+    # Initialize EHR delivery columns for all requested durations.
+    for d in durations_min:
+        cohort[f"EHR_Delivery_{d}mins"] = np.nan
 
     # --- Precompute diagnostic flags (vectorized) ---
     mask_eligible = cohort['eligible_day'] == 1
-    
+
     # Normalize and compare strings.
     cond_imv = cohort['device_category'].fillna('').str.strip().str.lower() == 'imv'
     cond_icu = cohort['location_category'].fillna('').str.strip().str.lower() == 'icu'
-    
+
     mode_cat_lower = cohort['mode_category'].fillna('').str.lower()
     cond_mode_ps = mode_cat_lower.str.contains('pressure support|cpap', regex=True)
-    cond_ps_le8 = cohort['pressure_support_set'] <= 8
-    cond_peep_le8 = cohort['peep_set'] <= 8
-    conditionA = cond_mode_ps & cond_ps_le8 & cond_peep_le8
+    cond_ps_le_thresh = cohort['pressure_support_set'] <= ps_threshold
+    cond_peep_le8 = cohort['peep_set'] <= 8  # PEEP threshold is fixed per protocol
+    conditionA = cond_mode_ps & cond_ps_le_thresh & cond_peep_le8
     # T-piece detection: CLIF 2.1 has no standard mode_category for T-piece.
     # Check mode_name (free text, site-specific) as a best-effort fallback.
     # Also check if mode_category was already mapped to 'pressure support/cpap' by waterfall.
@@ -185,11 +225,11 @@ def process_diagnostic_flip_sbt_optimized_v2(cohort):
         cohort.loc[mask_eligible & (~cond_imv), 'device_category']
     cohort.loc[mask_eligible & cond_imv & (~cond_icu), 'cond_location_icu'] = \
         cohort.loc[mask_eligible & cond_imv & (~cond_icu), 'location_category']
-    
+
     mask_composite_fail = mask_eligible & cond_imv & cond_icu & (~composite)
     cohort.loc[mask_composite_fail & (~cond_mode_ps), 'cond_mode_ps_cpap'] = \
         cohort.loc[mask_composite_fail & (~cond_mode_ps), 'mode_category']
-    mask_ps_fail = cohort['pressure_support_set'].isnull() | (cohort['pressure_support_set'] > 8)
+    mask_ps_fail = cohort['pressure_support_set'].isnull() | (cohort['pressure_support_set'] > ps_threshold)
     cohort.loc[mask_composite_fail & mask_ps_fail, 'cond_ps_set_le8'] = \
         cohort.loc[mask_composite_fail & mask_ps_fail, 'pressure_support_set']
     mask_peep_fail = cohort['peep_set'].isnull() | (cohort['peep_set'] > 8)
@@ -197,18 +237,18 @@ def process_diagnostic_flip_sbt_optimized_v2(cohort):
         cohort.loc[mask_composite_fail & mask_peep_fail, 'peep_set']
     cohort.loc[mask_composite_fail & (~cond_mode_tpiece), 'cond_mode_tpiece'] = \
         cohort.loc[mask_composite_fail & (~cond_mode_tpiece), 'mode_name']
-    
+
     # Mark candidate rows.
     cohort['flip_check_flag'] = False
     cohort.loc[mask_eligible, 'flip_check_flag'] = passed[mask_eligible]
-    
+
     # Compute the minimum IMV_Controlled_met_time per eligible group.
     cohort.loc[mask_eligible, 'min_met_time'] = (
         cohort.loc[mask_eligible]
         .groupby(['hospitalization_id', 'current_day'])['IMV_Controlled_met_time']
         .transform('min')
     )
-    
+
     # --- Process each eligible group using vectorized operations ---
     def process_group(group):
         # Work on a copy sorted by event_time.
@@ -216,7 +256,7 @@ def process_diagnostic_flip_sbt_optimized_v2(cohort):
         n = len(group)
         if n == 0:
             return group
-        
+
         # Convert event_time to numpy array.
         times = group['event_time'].values.astype('datetime64[ns]')
         flip_int = group['flip_check_flag'].astype(int).values
@@ -235,58 +275,56 @@ def process_diagnostic_flip_sbt_optimized_v2(cohort):
                     cnt_pass[i] = cumsum[end] - (cumsum[i-1] if i > 0 else 0)
             return (cnt_total == cnt_pass) & group['flip_check_flag'], cnt_total, cnt_pass
 
-        # Compute sustained flags for 2 mins, 5 mins, and 30 mins
-        group['sustained_2min'], group['cnt_total_2'], group['cnt_pass_2'] = compute_sustained(SBT_PRIMARY_DURATION_MIN)
-        group['sustained_5min'], group['cnt_total_5'], group['cnt_pass_5'] = compute_sustained(SBT_MODIFIED_DURATION_MIN)
-        group['sustained_30min'], group['cnt_total_30'], group['cnt_pass_30'] = compute_sustained(30)
+        # Compute sustained flags for each requested duration
+        sustained = {}
+        for d in durations_min:
+            key = f"sustained_{d}min"
+            cnt_total_key = f"cnt_total_{d}"
+            cnt_pass_key = f"cnt_pass_{d}"
+            group[key], group[cnt_total_key], group[cnt_pass_key] = compute_sustained(d)
+            sustained[d] = key
 
-        # Apply 2-min logic
+        # Apply primary-duration logic (first in durations_min list)
         candidate_indices = group.index[group['flip_check_flag']].tolist()
+        primary_key = sustained[primary_duration]
         for idx in candidate_indices:
             group.at[idx, 'first_flip_time'] = group.at[idx, 'event_time']
             if group.at[idx, 'event_time'] < group.at[idx, 'min_met_time']:
                 group.at[idx, 'flip_skip_reason'] = "Flip before IMV_Controlled_met_time"
                 continue
             else:
-                if group.at[idx, 'sustained_2min']:
-                    group.at[idx, 'EHR_Delivery_2mins'] = 1
+                if group.at[idx, primary_key]:
+                    group.at[idx, f'EHR_Delivery_{primary_duration}mins'] = 1
                     group.at[idx, 'flip_skip_reason'] = None
                     break
                 else:
-                    group.at[idx, 'flip_skip_reason'] = "ehr_delivery_2min not possible"
+                    group.at[idx, 'flip_skip_reason'] = f"ehr_delivery_{primary_duration}min not possible"
                     continue
 
-        # Apply 5-min logic (modified SBT per manuscript)
-        for idx in candidate_indices:
-            if group.at[idx, 'event_time'] < group.at[idx, 'min_met_time']:
-                continue
-            if group.at[idx, 'sustained_5min']:
-                group.at[idx, 'EHR_Delivery_5mins'] = 1
-                break
-
-        # Apply 30-min logic (independently)
-        for idx in candidate_indices:
-            if group.at[idx, 'event_time'] < group.at[idx, 'min_met_time']:
-                continue
-            if group.at[idx, 'sustained_30min']:
-                group.at[idx, 'EHR_Delivery_30mins'] = 1
-                break
+        # Apply logic for each remaining duration (independently)
+        for d in durations_min[1:]:
+            for idx in candidate_indices:
+                if group.at[idx, 'event_time'] < group.at[idx, 'min_met_time']:
+                    continue
+                if group.at[idx, sustained[d]]:
+                    group.at[idx, f'EHR_Delivery_{d}mins'] = 1
+                    break
 
         return group
 
     # Apply the per-group processing only on eligible rows.
     eligible_df = cohort[mask_eligible].copy()
     processed = eligible_df.groupby(['hospitalization_id', 'current_day'], group_keys=False).apply(process_group)
-    
+
     # Update only the eligible rows in the original DataFrame.
     cohort.update(processed)
-    
+
     # Remove helper columns.
-    helper_cols = ['cnt_total_2', 'cnt_pass_2', 'sustained_2min',
-                   'cnt_total_5', 'cnt_pass_5', 'sustained_5min',
-                   'cnt_total_30', 'cnt_pass_30', 'sustained_30min', 'min_met_time']
+    helper_cols = ['min_met_time']
+    for d in durations_min:
+        helper_cols += [f"cnt_total_{d}", f"cnt_pass_{d}", f"sustained_{d}min"]
     cohort.drop(columns=[col for col in helper_cols if col in cohort.columns], inplace=True)
-    
+
     return cohort
 
 

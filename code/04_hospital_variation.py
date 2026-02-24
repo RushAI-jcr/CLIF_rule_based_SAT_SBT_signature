@@ -340,6 +340,64 @@ def concordance_ehr_vs_flowsheet(df, ehr_col, flowsheet_col, output_path):
     loa_lower = bias - 1.96 * diff_rates.std()
     loa_upper = bias + 1.96 * diff_rates.std()
 
+    # ICC(3,1): two-way mixed, single-measures, absolute agreement
+    icc31 = np.nan
+    icc31_lower = np.nan
+    icc31_upper = np.nan
+    try:
+        import pingouin as pg
+        long = pd.melt(
+            merged,
+            id_vars="hospital_id",
+            value_vars=["ehr_rate", "flowsheet_rate"],
+            var_name="rater",
+            value_name="rate",
+        )
+        icc_df = pg.intraclass_corr(
+            data=long, targets="hospital_id", raters="rater", ratings="rate"
+        )
+        icc_row = icc_df[icc_df["Type"] == "ICC3"]
+        if len(icc_row) == 0:
+            raise ValueError("ICC3 row not found in pingouin output")
+        icc31 = float(icc_row["ICC"].values[0])
+        icc31_lower = float(icc_row["CI95%"].values[0][0])
+        icc31_upper = float(icc_row["CI95%"].values[0][1])
+    except Exception as _icc_exc:
+        # Manual fallback: ICC(3,1) two-way mixed, absolute agreement
+        # Formula: (MSb - MSe) / (MSb + (k-1)*MSe)
+        # where k = number of raters (2), MSb = between-targets MS, MSe = error MS
+        try:
+            k = 2  # two raters
+            n = len(merged)
+            grand_mean = merged[["ehr_rate", "flowsheet_rate"]].values.mean()
+            target_means = merged[["ehr_rate", "flowsheet_rate"]].mean(axis=1)
+            rater_means = merged[["ehr_rate", "flowsheet_rate"]].mean(axis=0)
+
+            ss_between = k * ((target_means - grand_mean) ** 2).sum()
+            ss_rater = n * ((rater_means - grand_mean) ** 2).sum()
+            ss_total = ((merged[["ehr_rate", "flowsheet_rate"]].values - grand_mean) ** 2).sum()
+            ss_error = ss_total - ss_between - ss_rater
+
+            ms_between = ss_between / (n - 1)
+            ms_error = ss_error / ((n - 1) * (k - 1))
+
+            denom = ms_between + (k - 1) * ms_error
+            icc31 = (ms_between - ms_error) / denom if denom != 0 else np.nan
+
+            # Approximate 95% CI via F-distribution (McGraw & Wong 1996)
+            from scipy.stats import f as f_dist
+            alpha = 0.05
+            df_between = n - 1
+            df_error = (n - 1) * (k - 1)
+            f_obs = ms_between / ms_error if ms_error != 0 else np.nan
+            if not np.isnan(f_obs):
+                f_lo = f_obs / f_dist.ppf(1 - alpha / 2, df_between, df_error)
+                f_hi = f_obs / f_dist.ppf(alpha / 2, df_between, df_error)
+                icc31_lower = (f_lo - 1) / (f_lo + k - 1)
+                icc31_upper = (f_hi - 1) / (f_hi + k - 1)
+        except Exception:
+            pass  # leave as nan if all else fails
+
     # Scatter plot
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -352,9 +410,19 @@ def concordance_ehr_vs_flowsheet(df, ehr_col, flowsheet_col, output_path):
     ax.set_xlabel("Flowsheet delivery rate", fontsize=9)
     ax.set_ylabel("EHR phenotype delivery rate", fontsize=9)
     ax.set_title("Correlation", fontsize=11, fontweight="bold")
+
+    _icc_label = (
+        f"ICC(3,1) = {icc31:.3f} (95% CI: {icc31_lower:.3f}-{icc31_upper:.3f})"
+        if not np.isnan(icc31) else ""
+    )
+    _annot_text = (
+        f"r = {r_pearson:.3f} (p = {p_pearson:.3f})\n"
+        f"rho = {r_spearman:.3f} (p = {p_spearman:.3f})"
+    )
+    if _icc_label:
+        _annot_text += f"\n{_icc_label}"
     ax.text(0.05, 0.92,
-            f"r = {r_pearson:.3f} (p = {p_pearson:.3f})\n"
-            f"rho = {r_spearman:.3f} (p = {p_spearman:.3f})",
+            _annot_text,
             transform=ax.transAxes, fontsize=8, verticalalignment="top")
 
     # Panel B: Bland-Altman
@@ -383,6 +451,8 @@ def concordance_ehr_vs_flowsheet(df, ehr_col, flowsheet_col, output_path):
         "spearman_p": p_spearman,
         "bias": bias,
         "loa": (loa_lower, loa_upper),
+        "icc31": icc31,
+        "icc31_ci": (icc31_lower, icc31_upper),
     }
 
 

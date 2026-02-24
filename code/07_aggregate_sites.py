@@ -52,6 +52,7 @@ from definitions_source_of_truth import (
     MIN_AGE, MAX_AGE,
 )
 from site_output_schema import compute_site_se
+from meta_analysis import cluster_bootstrap_concordance
 
 warnings.filterwarnings("ignore")
 
@@ -214,8 +215,64 @@ def compute_pooled_delivery_rates(data_dir):
 # 3. POOLED CONCORDANCE
 # ============================================================
 
+def _load_day_level_df(data_dir: str, trial_type: str) -> pd.DataFrame | None:
+    """Attempt to load the raw day-level DataFrame for ``trial_type`` (SAT|SBT).
+
+    Checks the canonical intermediate paths produced by the per-site pipeline.
+    Returns None if no file is found so callers can degrade gracefully.
+    """
+    candidates = [
+        os.path.join(data_dir, "intermediate", f"final_df_{trial_type}.csv"),
+        os.path.join(data_dir, "intermediate", f"final_df_{trial_type}.parquet"),
+        os.path.join(data_dir, "intermediate", f"day_level_{trial_type.lower()}.csv"),
+        os.path.join(data_dir, "intermediate", f"day_level_{trial_type.lower()}.parquet"),
+    ]
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            if path.endswith(".parquet"):
+                return pd.read_parquet(path)
+            return pd.read_csv(path, low_memory=False)
+        except Exception as exc:
+            print(f"  Warning: could not read {path}: {exc}")
+    return None
+
+
+def _bootstrap_ci_for_definition(
+    day_df: pd.DataFrame,
+    ehr_col: str,
+    flowsheet_col: str,
+) -> dict | None:
+    """Run ``cluster_bootstrap_concordance`` for one concordance definition.
+
+    Returns the full result dict on success, or None when the required
+    columns are absent or the bootstrap cannot be run.
+    """
+    if ehr_col not in day_df.columns or flowsheet_col not in day_df.columns:
+        return None
+    try:
+        return cluster_bootstrap_concordance(
+            day_level_df=day_df,
+            ehr_col=ehr_col,
+            flowsheet_col=flowsheet_col,
+            cluster_col="imv_episode_id",
+            n_boot=1000,
+            seed=42,
+        )
+    except Exception as exc:
+        print(f"  Bootstrap failed for ({ehr_col}, {flowsheet_col}): {exc}")
+        return None
+
+
 def compute_pooled_concordance(data_dir):
-    """Pool concordance metrics across sites from concordance_summary CSVs."""
+    """Pool concordance metrics across sites from concordance_summary CSVs.
+
+    After computing aggregate point estimates from the confusion-matrix
+    summaries, the function attempts to load the raw day-level intermediate
+    data to run ``cluster_bootstrap_concordance`` and append 95% percentile
+    CI columns to each pooled row.
+    """
     concordance_files = []
     for root, dirs, files in os.walk(os.path.join(data_dir, "final")):
         for f in files:
@@ -278,7 +335,7 @@ def compute_pooled_concordance(data_dir):
         # Pooled kappa (if available)
         kappa_mean = group["Cohen_Kappa"].mean() if "Cohen_Kappa" in group.columns else np.nan
 
-        pooled.append({
+        row: dict = {
             "definition": col_name,
             "trial_type": group["trial_type"].iloc[0] if "trial_type" in group.columns else "",
             "n_hospitals": len(group),
@@ -290,9 +347,87 @@ def compute_pooled_concordance(data_dir):
             "NPV": round(npv, 3),
             "F1": round(f1, 3),
             "Cohen_Kappa_mean": round(kappa_mean, 3) if not np.isnan(kappa_mean) else np.nan,
-        })
+        }
 
-    return pd.DataFrame(pooled)
+        # CI columns default to NaN; filled in below if bootstrap succeeds
+        for metric in ("Sensitivity", "Specificity", "PPV", "NPV", "F1",
+                        "Accuracy", "Kappa"):
+            row[f"{metric}_CI_low"] = np.nan
+            row[f"{metric}_CI_high"] = np.nan
+
+        pooled.append(row)
+
+    pooled_df = pd.DataFrame(pooled)
+    if pooled_df.empty:
+        return pooled_df
+
+    # ------------------------------------------------------------------ #
+    # Bootstrap CIs: attempt to load raw day-level data per trial type    #
+    # ------------------------------------------------------------------ #
+    # Build a mapping: definition column name -> (ehr_col, flowsheet_col).
+    # The concordance_summary files store the column pair in the "Column"
+    # field; by convention the EHR column is the reference and is paired
+    # with a flowsheet column.  We look for an "EHR_col" / "Flowsheet_col"
+    # metadata column in the summary, otherwise we try the definition name
+    # itself as both (i.e. the concordance was computed on a single binary
+    # column compared against itself - unlikely but safe to attempt).
+    def _col_pair_from_group(grp: pd.DataFrame, definition: str):
+        """Extract (ehr_col, flowsheet_col) from a summary group."""
+        if "EHR_col" in grp.columns and "Flowsheet_col" in grp.columns:
+            ehr = grp["EHR_col"].iloc[0]
+            fs  = grp["Flowsheet_col"].iloc[0]
+            return ehr, fs
+        # Fallback: treat definition as the column name pair separated by
+        # " vs " or "__vs__"
+        for sep in (" vs ", "__vs__", " VS "):
+            if sep in definition:
+                parts = definition.split(sep, 1)
+                return parts[0].strip(), parts[1].strip()
+        return definition, definition
+
+    trial_day_cache: dict[str, pd.DataFrame | None] = {}
+
+    for idx, row in pooled_df.iterrows():
+        trial = row["trial_type"]
+        definition = row["definition"]
+
+        # Load (and cache) the day-level DataFrame for this trial type
+        if trial not in trial_day_cache:
+            print(f"  Loading day-level data for bootstrap CIs ({trial})...")
+            trial_day_cache[trial] = _load_day_level_df(data_dir, trial)
+
+        day_df = trial_day_cache.get(trial)
+        if day_df is None:
+            continue  # No raw data available; leave CI columns as NaN
+
+        # Recover the concordance column pair for this definition
+        grp = metrics_df[metrics_df[group_col] == definition]
+        ehr_col, flowsheet_col = _col_pair_from_group(grp, definition)
+
+        boot = _bootstrap_ci_for_definition(day_df, ehr_col, flowsheet_col)
+        if boot is None:
+            continue
+
+        # Merge CI values back into the pooled row
+        metric_map = {
+            "Sensitivity": "sensitivity",
+            "Specificity": "specificity",
+            "PPV":         "ppv",
+            "NPV":         "npv",
+            "F1":          "f1",
+            "Accuracy":    "accuracy",
+            "Kappa":       "kappa",
+        }
+        for col_prefix, boot_key in metric_map.items():
+            if boot_key in boot:
+                pooled_df.at[idx, f"{col_prefix}_CI_low"]  = boot[boot_key]["ci_low"]
+                pooled_df.at[idx, f"{col_prefix}_CI_high"] = boot[boot_key]["ci_high"]
+
+        print(f"  Bootstrap CIs added for '{definition}' ({trial}): "
+              f"n={boot['n_rows']} rows, {boot['n_clusters']} clusters "
+              f"[{boot['cluster_col_used']}]")
+
+    return pooled_df
 
 
 # ============================================================
@@ -448,18 +583,44 @@ def compile_manuscript_numbers(consort, rates_df, concordance_df):
             "range": f"[{row.get('range_low', '')}, {row.get('range_high', '')}]",
         }
 
-    # Concordance
+    # Concordance — include bootstrap CI columns when present
+    _ci_metric_map = {
+        "accuracy":    ("Accuracy",    "Accuracy_CI_low",    "Accuracy_CI_high"),
+        "sensitivity": ("Sensitivity", "Sensitivity_CI_low", "Sensitivity_CI_high"),
+        "specificity": ("Specificity", "Specificity_CI_low", "Specificity_CI_high"),
+        "ppv":         ("PPV",         "PPV_CI_low",         "PPV_CI_high"),
+        "npv":         ("NPV",         "NPV_CI_low",         "NPV_CI_high"),
+        "f1":          ("F1",          "F1_CI_low",          "F1_CI_high"),
+        "kappa":       ("Cohen_Kappa_mean", "Kappa_CI_low",  "Kappa_CI_high"),
+    }
+
     for _, row in concordance_df.iterrows():
         key = f"concordance_{row.get('trial_type', '')}_{row['definition']}"
-        numbers[key] = {
-            "accuracy": row.get("Accuracy", ""),
-            "sensitivity": row.get("Sensitivity", ""),
-            "specificity": row.get("Specificity", ""),
-            "ppv": row.get("PPV", ""),
-            "npv": row.get("NPV", ""),
-            "f1": row.get("F1", ""),
-            "kappa": row.get("Cohen_Kappa_mean", ""),
-        }
+        entry: dict = {}
+
+        for out_key, (point_col, ci_low_col, ci_high_col) in _ci_metric_map.items():
+            point_val = row.get(point_col, "")
+            ci_low    = row.get(ci_low_col, np.nan)
+            ci_high   = row.get(ci_high_col, np.nan)
+
+            # Format as "0.XXX (95% CI 0.XXX-0.XXX)" when CIs are available
+            if (pd.notna(ci_low) and pd.notna(ci_high)
+                    and ci_low != "" and ci_high != ""):
+                try:
+                    entry[out_key] = (
+                        f"{float(point_val):.3f} "
+                        f"(95% CI {float(ci_low):.3f}-{float(ci_high):.3f})"
+                    )
+                except (TypeError, ValueError):
+                    entry[out_key] = point_val
+            else:
+                entry[out_key] = point_val
+
+            # Also expose raw numeric CI values for downstream use
+            entry[f"{out_key}_ci_low"]  = ci_low  if pd.notna(ci_low)  else None
+            entry[f"{out_key}_ci_high"] = ci_high if pd.notna(ci_high) else None
+
+        numbers[key] = entry
 
     return numbers
 
