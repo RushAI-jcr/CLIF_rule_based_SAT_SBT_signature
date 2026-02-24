@@ -1,24 +1,31 @@
 # Deliverable Matrix: Manuscript to Code Outputs
 
-## Tables
+**Target journal:** Intensive Care Medicine (ICM)
+**Constraint:** Max 5 illustrations (figures + tables combined) in main manuscript
 
-| Deliverable | Manuscript Ref | Code Source | Output File(s) | Status |
-|---|---|---|---|---|
-| **Table 1**: Operational Definitions | Line 122 | `07_aggregate_sites.py` | `output/final/pooled/table1_operational_definitions.csv` | **DONE** |
-| **Table 2**: Patient Characteristics | Lines 124-126 | `01_SAT`, `02_SBT`, `05_manuscript_figures.py` | `output/final/{SITE}/*/table1_*.csv` → pooled | **DONE** |
-| **Table 3**: Confusion Matrix | Line 130 | `01_SAT` (cell 28), `02_SBT` (cells 21, 27) | `delivery_concordance_summary*.csv` → pooled | **DONE** |
-| **Table 4**: Criterion Validity Metrics | Lines 133-134 | `07_aggregate_sites.py` | `output/final/pooled/pooled_concordance.csv` | **DONE** |
-| **Table 5**: Construct Validity | Line 135 | `03_outcome_models.py` | `output/final/construct_validity_outcomes.csv` | **DONE** |
+## Main Manuscript (5 illustrations)
 
-## Figures
+| Deliverable | Code Source | Output File | Status |
+|---|---|---|---|
+| **Table 1**: Operational Definitions | `07_aggregate_sites.py` | `output/final/pooled/table1_operational_definitions.csv` | **DONE** |
+| **Table 2**: Patient Characteristics | `07_aggregate_sites.py`, `05_manuscript_figures.py` | `output/final/figures/table2_pooled_*.csv` | **DONE** |
+| **Figure 1**: CONSORT Flow | `05_manuscript_figures.py` | `output/final/figures/fig1_consort.{pdf,tiff,eps}` | **DONE** |
+| **Figure 2**: Criterion Validity | `05_manuscript_figures.py` | `output/final/figures/fig2_criterion_validity.{pdf,tiff,eps}` | **DONE** |
+| **Figure 3**: Hospital Variation + Pooled Rates | `05_manuscript_figures.py` + `04_hospital_variation.py` | `output/final/figures/fig3_variation_forest.{pdf,tiff,eps}` | **DONE** |
 
-| Deliverable | Manuscript Ref | Code Source | Output File | Status |
-|---|---|---|---|---|
-| **Figure 1**: CONSORT Flow | Line 139 | `05_manuscript_figures.py` + `07_aggregate_sites.py` | `output/final/figures/fig1_consort.pdf` | **DONE** |
-| **Figure 2**: Phenotyping Logic | Lines 141-142 | `05_manuscript_figures.py` | `output/final/figures/fig2_phenotype_logic.pdf` | **DONE** |
-| **Figure 3**: Criterion Validity | Lines 143-144 | `05_manuscript_figures.py` | `output/final/figures/fig3_criterion_validity.pdf` | **DONE** |
-| **Figure 4**: Timing/Pairing | Lines 145-146 | `05_manuscript_figures.py` | `output/final/figures/fig4_timing_pairing.pdf` | **DONE** |
-| **Figure 5**: Hospital Variation | Lines 147-148 | `04_hospital_variation.py` | `output/final/figures/fig5_caterpillar_*.pdf` | **DONE** |
+## Electronic Supplementary Material (ESM)
+
+| Deliverable | Code Source | Output File | Status |
+|---|---|---|---|
+| **eTable 1**: Construct Validity Outcomes | `07_aggregate_sites.py` | `output/final/esm/etable1_construct_validity.csv` | **DONE** |
+| **eTable 2**: Site-Stratified Concordance | `07_aggregate_sites.py` | `output/final/esm/etable2_site_concordance.csv` | **DONE** |
+| **eTable 3**: Sensitivity Analyses | `07_aggregate_sites.py` | `output/final/esm/etable3_sensitivity_analyses.csv` | **DONE** |
+| **eFigure 1**: Phenotyping Logic Diagram | `05_manuscript_figures.py` | `output/final/esm/efig1_phenotype_logic.pdf` | **DONE** |
+| **eFigure 2**: SAT+SBT Timing/Pairing | `05_manuscript_figures.py` | `output/final/esm/efig2_timing_pairing.pdf` | **DONE** |
+| **eFigure 3**: Forest + Funnel Plots | `05_manuscript_figures.py` | `output/final/esm/efig3_forest_*.pdf` | **DONE** |
+| **eFigure 4**: Data Completeness Heatmap | `05_manuscript_figures.py` | `output/final/esm/efig4_completeness.pdf` | **DONE** |
+| **eFigure 5**: Bland-Altman EHR vs Flowsheet | `04_hospital_variation.py` | `output/final/figures/concordance_*.pdf` | **DONE** |
+| **eFigure 6**: Outcome Model Forest Plot | `05_manuscript_figures.py` | `output/final/esm/efig6_outcomes.pdf` | **DONE** |
 
 ## Analysis Pipelines
 
@@ -29,9 +36,19 @@
 | SBT phenotyping (4 variants) + criterion validity | `02_SBT_*.ipynb` | **DONE** |
 | Construct validity outcome models | `03_outcome_models.py` | **DONE** |
 | Hospital-level variation + caterpillar | `04_hospital_variation.py` | **DONE** |
-| Manuscript-ready figures | `05_manuscript_figures.py` | **DONE** |
-| Sensitivity analyses | `06_sensitivity_analyses.py` | **PARTIAL** (framework ready, re-run with alt params not implemented) |
-| Cross-site aggregation | `07_aggregate_sites.py` | **DONE** |
+| Manuscript-ready figures + ESM | `05_manuscript_figures.py` | **DONE** |
+| Sensitivity analyses | `06_sensitivity_analyses.py` | **PARTIAL** |
+| Cross-site aggregation + ESM tables | `07_aggregate_sites.py` | **DONE** |
+
+## ICM Submission Requirements
+
+- **Word limit:** 3,000 words (original article)
+- **Abstract:** 250 words, structured (Purpose, Methods, Results, Conclusions)
+- **Keywords:** 3-5
+- **Illustrations:** Max 5 (figures + tables) in main manuscript
+- **Figure formats:** PDF/EPS (vector), TIFF >= 600 DPI (combination)
+- **ESM:** No limit on supplementary figures/tables
+- **References:** Follow Vancouver style
 
 ## Manuscript Numbers
 

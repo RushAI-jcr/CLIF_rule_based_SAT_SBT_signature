@@ -185,7 +185,7 @@ def compute_pooled_delivery_rates(data_dir):
                             n_col="n_eligible",
                             label_col="hospital_id",
                         )
-                        pooled_row = summary[summary["label"] == "Pooled (RE)"].iloc[0]
+                        pooled_row = summary[summary["label"].str.startswith("Pooled")].iloc[0]
                         result["pooled_rate_re"] = round(pooled_row["eff_prop"], 4)
                         result["pooled_ci_low"] = round(pooled_row["ci_low_prop"], 4)
                         result["pooled_ci_high"] = round(pooled_row["ci_upp_prop"], 4)
@@ -465,6 +465,85 @@ def compile_manuscript_numbers(consort, rates_df, concordance_df):
 
 
 # ============================================================
+# 6. ESM TABLES
+# ============================================================
+
+def generate_esm_tables(data_dir, output_dir):
+    """Generate Electronic Supplementary Material tables for ICM submission.
+
+    eTable 1: Construct validity outcome models
+    eTable 2: Site-stratified confusion matrices
+    eTable 3: Sensitivity analysis results
+    """
+    esm_dir = os.path.join(output_dir, "..", "esm")
+    os.makedirs(esm_dir, exist_ok=True)
+
+    # eTable 1: Construct validity outcomes
+    outcomes_path = os.path.join(data_dir, "final", "construct_validity_outcomes.csv")
+    if os.path.exists(outcomes_path):
+        df = pd.read_csv(outcomes_path)
+        # Format for publication: round, add CI strings
+        for est_col, lo_col, hi_col in [
+            ("HR", "HR_lower_95", "HR_upper_95"),
+            ("OR", "OR_lower_95", "OR_upper_95"),
+            ("IRR", "IRR_lower_95", "IRR_upper_95"),
+        ]:
+            if est_col in df.columns:
+                mask = df[est_col].notna()
+                df.loc[mask, f"{est_col}_formatted"] = df.loc[mask].apply(
+                    lambda r: f"{r[est_col]:.2f} ({r.get(lo_col, 'NA'):.2f}-{r.get(hi_col, 'NA'):.2f})"
+                    if pd.notna(r.get(lo_col)) else f"{r[est_col]:.2f}",
+                    axis=1,
+                )
+        df.to_csv(os.path.join(esm_dir, "etable1_construct_validity.csv"), index=False)
+        print(f"  eTable 1 (construct validity) saved")
+    else:
+        print(f"  eTable 1 skipped: {outcomes_path} not found")
+
+    # eTable 2: Site-stratified concordance (full confusion matrices)
+    concordance_files = []
+    for root, dirs, files in os.walk(os.path.join(data_dir, "final")):
+        for f in files:
+            if "concordance_summary" in f and f.endswith(".csv"):
+                concordance_files.append(os.path.join(root, f))
+
+    if concordance_files:
+        all_conc = []
+        for fpath in concordance_files:
+            try:
+                cdf = pd.read_csv(fpath)
+                # Extract site from path
+                parts = fpath.split(os.sep)
+                site_parts = [p for p in parts if p not in ["output", "final", "intermediate"]]
+                cdf["site"] = site_parts[-2] if len(site_parts) >= 2 else "Unknown"
+                all_conc.append(cdf)
+            except Exception:
+                pass
+        if all_conc:
+            full_conc = pd.concat(all_conc, ignore_index=True)
+            full_conc.to_csv(os.path.join(esm_dir, "etable2_site_concordance.csv"), index=False)
+            print(f"  eTable 2 (site-stratified concordance) saved: {len(concordance_files)} files")
+    else:
+        print(f"  eTable 2 skipped: no concordance files found")
+
+    # eTable 3: Sensitivity analyses
+    sensitivity_dir = os.path.join(data_dir, "final", "sensitivity")
+    if os.path.exists(sensitivity_dir):
+        sens_frames = []
+        for f in sorted(os.listdir(sensitivity_dir)):
+            if f.startswith("sensitivity_") and f.endswith(".csv"):
+                sdf = pd.read_csv(os.path.join(sensitivity_dir, f))
+                sdf["source_file"] = f
+                sens_frames.append(sdf)
+        if sens_frames:
+            all_sens = pd.concat(sens_frames, ignore_index=True)
+            all_sens.to_csv(os.path.join(esm_dir, "etable3_sensitivity_analyses.csv"), index=False)
+            print(f"  eTable 3 (sensitivity analyses) saved: {len(sens_frames)} files")
+    else:
+        print(f"  eTable 3 skipped: sensitivity dir not found")
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -503,8 +582,12 @@ def run_aggregation(data_dir, output_dir):
         os.path.join(output_dir, "table1_operational_definitions.csv")
     )
 
-    # 5. Manuscript numbers JSON
-    print("\n5. Compiling manuscript numbers...")
+    # 5. ESM tables
+    print("\n5. Generating ESM tables...")
+    generate_esm_tables(data_dir, output_dir)
+
+    # 6. Manuscript numbers JSON
+    print("\n6. Compiling manuscript numbers...")
     if not rates_df.empty or not concordance_df.empty:
         numbers = compile_manuscript_numbers(
             consort,

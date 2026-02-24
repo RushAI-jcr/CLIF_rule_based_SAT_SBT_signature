@@ -568,9 +568,309 @@ def generate_pooled_criterion_validity(data_dir, output_dir):
 # MAIN
 # ============================================================
 
-def generate_all_figures(data_dir, output_dir):
-    """Generate all manuscript figures."""
+def _save_multi_format(fig, base_path, dpi=600):
+    """Save figure in PDF, TIFF (600 DPI), and EPS for ICM submission.
+
+    ICM/Springer requirements:
+    - Vector: EPS or PDF
+    - Halftone: TIFF >= 300 DPI
+    - Combination (text + data): TIFF >= 600 DPI
+    """
+    fig.savefig(base_path, bbox_inches="tight", dpi=300)  # PDF
+    tiff_path = base_path.replace(".pdf", ".tiff")
+    fig.savefig(tiff_path, bbox_inches="tight", dpi=dpi, format="tiff")
+    eps_path = base_path.replace(".pdf", ".eps")
+    try:
+        fig.savefig(eps_path, bbox_inches="tight", format="eps")
+    except Exception as e:
+        print(f"  EPS export failed ({e}), PDF and TIFF saved")
+    print(f"  Saved: {base_path} (+TIFF, EPS)")
+
+
+# ============================================================
+# FIGURE 3 (MAIN): COMPOSITE HOSPITAL VARIATION + FOREST PLOT
+# ============================================================
+
+def figure3_variation_forest(data_dir, output_path):
+    """Composite Figure 3: Hospital variation caterpillar + meta-analytic forest.
+
+    Panel A: SAT caterpillar plot
+    Panel B: SBT caterpillar plot
+    Panel C: Pooled delivery rate forest plot (SAT + SBT definitions)
+
+    Combines data from 04_hospital_variation.py and meta_analysis.py.
+    """
+    from meta_analysis import run_proportion_meta_analysis
+
+    sat_path = os.path.join(data_dir, "final_df_SAT.csv")
+    sbt_path = os.path.join(data_dir, "final_df_SBT.csv")
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 8))
+
+    # Panel A: SAT caterpillar
+    if os.path.exists(sat_path):
+        sat_df = pd.read_csv(sat_path, low_memory=False)
+        try:
+            # Import from sibling module
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "hosp_var",
+                os.path.join(os.path.dirname(__file__), "04_hospital_variation.py"),
+            )
+            hosp_var = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(hosp_var)
+
+            dcol = "SAT_EHR_delivery" if "SAT_EHR_delivery" in sat_df.columns else None
+            if dcol:
+                rates = hosp_var.compute_risk_adjusted_rates(sat_df, dcol)
+                hosp_var.caterpillar_plot(rates, "SAT delivery", "", ax=axes[0])
+                axes[0].set_title("A. SAT hospital variation", fontsize=10, fontweight="bold")
+        except Exception as e:
+            print(f"  Panel A failed: {e}")
+            axes[0].text(0.5, 0.5, "[SAT data pending]", ha="center", va="center",
+                         fontsize=10, transform=axes[0].transAxes)
+    else:
+        axes[0].text(0.5, 0.5, "[SAT data not found]", ha="center", va="center",
+                     fontsize=10, transform=axes[0].transAxes)
+        axes[0].set_title("A. SAT hospital variation", fontsize=10, fontweight="bold")
+
+    # Panel B: SBT caterpillar
+    if os.path.exists(sbt_path):
+        sbt_df = pd.read_csv(sbt_path, low_memory=False)
+        try:
+            dcol = "EHR_Delivery_2mins" if "EHR_Delivery_2mins" in sbt_df.columns else None
+            if dcol:
+                rates = hosp_var.compute_risk_adjusted_rates(sbt_df, dcol)
+                hosp_var.caterpillar_plot(rates, "SBT delivery", "", ax=axes[1])
+                axes[1].set_title("B. SBT hospital variation", fontsize=10, fontweight="bold")
+        except Exception as e:
+            print(f"  Panel B failed: {e}")
+            axes[1].text(0.5, 0.5, "[SBT data pending]", ha="center", va="center",
+                         fontsize=10, transform=axes[1].transAxes)
+    else:
+        axes[1].text(0.5, 0.5, "[SBT data not found]", ha="center", va="center",
+                     fontsize=10, transform=axes[1].transAxes)
+        axes[1].set_title("B. SBT hospital variation", fontsize=10, fontweight="bold")
+
+    # Panel C: Forest plot of pooled delivery rates
+    ax = axes[2]
+    ax.set_title("C. Pooled delivery rates", fontsize=10, fontweight="bold")
+    pooled_path = os.path.join(data_dir, "..", "final", "pooled", "pooled_delivery_rates.csv")
+    if os.path.exists(pooled_path):
+        try:
+            rates_df = pd.read_csv(pooled_path)
+            definitions = rates_df["delivery_definition"].tolist()
+            pooled_rates = rates_df["pooled_rate_re"].fillna(rates_df["overall_rate"]).values
+            ci_lo = rates_df["pooled_ci_low"].fillna(pooled_rates - 0.05).values
+            ci_hi = rates_df["pooled_ci_high"].fillna(pooled_rates + 0.05).values
+
+            y_pos = range(len(definitions))
+            ax.errorbar(pooled_rates, y_pos,
+                         xerr=[pooled_rates - ci_lo, ci_hi - pooled_rates],
+                         fmt="D", color="#B2182B", ecolor="#F4A582",
+                         elinewidth=1.5, capsize=3, markersize=6)
+            ax.set_yticks(list(y_pos))
+            ax.set_yticklabels([d.replace("_", " ") for d in definitions], fontsize=8)
+            ax.set_xlabel("Pooled delivery rate (95% CI)", fontsize=9)
+            ax.set_xlim(-0.05, 1.0)
+            ax.grid(axis="x", alpha=0.3)
+
+            # Annotate with rate text
+            for i, (rate, lo, hi) in enumerate(zip(pooled_rates, ci_lo, ci_hi)):
+                ax.text(max(hi + 0.02, 0.5), i,
+                         f"{rate:.1%} ({lo:.1%}-{hi:.1%})",
+                         va="center", fontsize=8)
+        except Exception as e:
+            print(f"  Panel C failed: {e}")
+            ax.text(0.5, 0.5, "[Run 07_aggregate_sites.py first]",
+                     ha="center", va="center", fontsize=10, transform=ax.transAxes)
+    else:
+        ax.text(0.5, 0.5, "[Pooled data not found]",
+                 ha="center", va="center", fontsize=10, transform=ax.transAxes)
+
+    plt.tight_layout()
+    _save_multi_format(fig, output_path)
+    plt.close(fig)
+    print(f"Figure 3 saved: {output_path}")
+
+
+# ============================================================
+# ESM FIGURES
+# ============================================================
+
+def efigure4_completeness_heatmap(data_dir, output_path):
+    """eFigure 4: Data completeness heatmap (hospital x data element)."""
+    matrix_path = os.path.join(data_dir, "sensitivity", "data_completeness_matrix.csv")
+    if not os.path.exists(matrix_path):
+        print(f"  Completeness matrix not found: {matrix_path}")
+        return
+
+    df = pd.read_csv(matrix_path, index_col=0)
+    n_elements, n_hospitals = df.shape
+
+    fig, ax = plt.subplots(figsize=(max(6, n_hospitals * 0.6), max(4, n_elements * 0.4)))
+    im = ax.imshow(df.values.astype(float), cmap="RdYlGn", vmin=0, vmax=1, aspect="auto")
+
+    ax.set_xticks(range(n_hospitals))
+    ax.set_xticklabels(df.columns, fontsize=8, rotation=45, ha="right")
+    ax.set_yticks(range(n_elements))
+    ax.set_yticklabels(df.index, fontsize=8)
+    ax.set_title("Data completeness by hospital", fontsize=11, fontweight="bold")
+
+    # Annotate cells
+    for i in range(n_elements):
+        for j in range(n_hospitals):
+            val = df.iloc[i, j]
+            if pd.notna(val):
+                ax.text(j, i, f"{val:.0%}", ha="center", va="center",
+                         fontsize=8, color="black" if val > 0.5 else "white")
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.04)
+    cbar.set_label("Completeness", fontsize=9)
+    cbar.ax.tick_params(labelsize=8)
+
+    plt.tight_layout()
+    _save_multi_format(fig, output_path, dpi=300)
+    plt.close(fig)
+    print(f"eFigure 4 saved: {output_path}")
+
+
+def efigure6_outcome_forest(data_dir, output_path):
+    """eFigure 6: Forest plot of construct validity outcome models."""
+    outcomes_path = os.path.join(data_dir, "final", "construct_validity_outcomes.csv")
+    if not os.path.exists(outcomes_path):
+        print(f"  Outcomes file not found: {outcomes_path}")
+        return
+
+    df = pd.read_csv(outcomes_path)
+    # Filter to rows with effect estimates
+    has_hr = df["HR"].notna() if "HR" in df.columns else pd.Series(False, index=df.index)
+    has_or = df["OR"].notna() if "OR" in df.columns else pd.Series(False, index=df.index)
+    has_irr = df["IRR"].notna() if "IRR" in df.columns else pd.Series(False, index=df.index)
+
+    plot_rows = df[has_hr | has_or | has_irr].copy()
+    if plot_rows.empty:
+        print("  No effect estimates found for forest plot")
+        return
+
+    # Build label + effect + CI
+    labels = []
+    effects = []
+    ci_lo = []
+    ci_hi = []
+    for _, row in plot_rows.iterrows():
+        lbl = f"{row.get('trial_type', '')} {row.get('delivery_definition', '')}\n{row.get('model', '')}"
+        labels.append(lbl.strip())
+        if pd.notna(row.get("HR")):
+            effects.append(row["HR"])
+            ci_lo.append(row.get("HR_lower_95", row["HR"] * 0.8))
+            ci_hi.append(row.get("HR_upper_95", row["HR"] * 1.2))
+        elif pd.notna(row.get("OR")):
+            effects.append(row["OR"])
+            ci_lo.append(row.get("OR_lower_95", row["OR"] * 0.8))
+            ci_hi.append(row.get("OR_upper_95", row["OR"] * 1.2))
+        elif pd.notna(row.get("IRR")):
+            effects.append(row["IRR"])
+            ci_lo.append(row.get("IRR_lower_95", row["IRR"] * 0.8))
+            ci_hi.append(row.get("IRR_upper_95", row["IRR"] * 1.2))
+
+    n = len(labels)
+    fig, ax = plt.subplots(figsize=(10, max(4, n * 0.5)))
+    y_pos = range(n - 1, -1, -1)
+
+    ax.errorbar(effects, list(y_pos),
+                 xerr=[np.array(effects) - np.array(ci_lo),
+                       np.array(ci_hi) - np.array(effects)],
+                 fmt="s", color="#2166AC", ecolor="#92C5DE",
+                 elinewidth=1.5, capsize=3, markersize=5)
+
+    ax.axvline(1.0, color="gray", linestyle="--", linewidth=0.8)
+    ax.set_yticks(list(y_pos))
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel("Effect estimate (HR / OR / IRR) with 95% CI", fontsize=9)
+    ax.set_title("Construct validity: outcome model results", fontsize=11, fontweight="bold")
+    ax.grid(axis="x", alpha=0.3)
+
+    plt.tight_layout()
+    _save_multi_format(fig, output_path)
+    plt.close(fig)
+    print(f"eFigure 6 saved: {output_path}")
+
+
+def generate_esm_figures(data_dir, esm_dir):
+    """Generate all Electronic Supplementary Material figures."""
+    os.makedirs(esm_dir, exist_ok=True)
+
+    print("\n--- ESM Figures ---")
+
+    # eFigure 1: Phenotyping logic (moved from main Figure 2)
+    print("eFigure 1: Phenotyping logic...")
+    figure2_phenotype_logic(os.path.join(esm_dir, "efig1_phenotype_logic.pdf"))
+
+    # eFigure 2: Timing and pairing (moved from main Figure 4)
+    print("eFigure 2: Timing and pairing...")
+    figure4_timing_pairing(data_dir, os.path.join(esm_dir, "efig2_timing_pairing.pdf"))
+
+    # eFigure 3: Forest + funnel plots
+    print("eFigure 3: Forest + funnel plots...")
+    pooled_path = os.path.join(data_dir, "..", "final", "pooled", "pooled_delivery_rates.csv")
+    if os.path.exists(pooled_path):
+        try:
+            from meta_analysis import jama_forest_plot, funnel_plot
+            rates_df = pd.read_csv(pooled_path)
+            # Build summary format for forest plot
+            for trial in rates_df["trial_type"].unique():
+                subset = rates_df[rates_df["trial_type"] == trial]
+                if "pooled_rate_re" in subset.columns and subset["pooled_rate_re"].notna().any():
+                    summary = pd.DataFrame({
+                        "label": subset["delivery_definition"],
+                        "eff": subset["pooled_rate_re"].fillna(subset["overall_rate"]),
+                        "ci_low": subset["pooled_ci_low"].fillna(0),
+                        "ci_upp": subset["pooled_ci_high"].fillna(1),
+                    })
+                    fig, ax = jama_forest_plot(summary, outcome_label=f"{trial} delivery rate")
+                    _save_multi_format(fig, os.path.join(esm_dir, f"efig3_forest_{trial}.pdf"))
+                    plt.close(fig)
+        except Exception as e:
+            print(f"  eFigure 3 failed: {e}")
+    else:
+        print(f"  Pooled rates not found for eFigure 3")
+
+    # eFigure 4: Data completeness heatmap
+    print("eFigure 4: Data completeness heatmap...")
+    efigure4_completeness_heatmap(
+        os.path.join(data_dir, ".."),
+        os.path.join(esm_dir, "efig4_completeness.pdf"),
+    )
+
+    # eFigure 5: Bland-Altman (already generated by 04_hospital_variation.py)
+    print("eFigure 5: Bland-Altman — generated by 04_hospital_variation.py")
+
+    # eFigure 6: Outcome model forest plot
+    print("eFigure 6: Outcome model forest plot...")
+    efigure6_outcome_forest(
+        os.path.join(data_dir, ".."),
+        os.path.join(esm_dir, "efig6_outcomes.pdf"),
+    )
+
+    print("ESM figures complete.")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def generate_all_figures(data_dir, output_dir, esm_dir=None):
+    """Generate all manuscript figures per ICM submission guidelines.
+
+    ICM allows max 5 illustrations (figures + tables) in main manuscript.
+    Main: Figure 1 (CONSORT), Figure 2 (criterion validity), Figure 3 (variation+forest)
+    Tables 1-2 generated by 07_aggregate_sites.py.
+    All other content goes to ESM.
+    """
     os.makedirs(output_dir, exist_ok=True)
+    if esm_dir is None:
+        esm_dir = os.path.join(output_dir, "..", "esm")
 
     # Load CONSORT numbers from aggregation output (if available)
     import json
@@ -581,30 +881,35 @@ def generate_all_figures(data_dir, output_dir):
             site_stats = json.load(f)
         print(f"Loaded CONSORT numbers from {consort_path}")
 
-    print("Generating Figure 1: CONSORT flow diagram...")
+    print("=" * 60)
+    print("MAIN MANUSCRIPT FIGURES (ICM: max 5 illustrations total)")
+    print("=" * 60)
+
+    print("\nFigure 1: CONSORT flow diagram...")
     figure1_consort(data_dir, os.path.join(output_dir, "fig1_consort.pdf"), site_stats=site_stats)
 
-    print("Generating Figure 2: Phenotyping logic...")
-    figure2_phenotype_logic(os.path.join(output_dir, "fig2_phenotype_logic.pdf"))
+    print("\nFigure 2: Criterion validity (confusion matrices + metrics)...")
+    figure3_criterion_validity(data_dir, os.path.join(output_dir, "fig2_criterion_validity.pdf"))
 
-    print("Generating Figure 3: Criterion validity...")
-    figure3_criterion_validity(data_dir, os.path.join(output_dir, "fig3_criterion_validity.pdf"))
+    print("\nFigure 3: Hospital variation + pooled rates (composite)...")
+    figure3_variation_forest(data_dir, os.path.join(output_dir, "fig3_variation_forest.pdf"))
 
-    print("Generating Figure 4: Timing and pairing...")
-    figure4_timing_pairing(data_dir, os.path.join(output_dir, "fig4_timing_pairing.pdf"))
-
-    # Figure 5 (caterpillar) is generated by 04_hospital_variation.py
-
-    print("\nGenerating pooled tables...")
+    print("\nGenerating pooled tables (Table 2)...")
     generate_pooled_table2(data_dir, output_dir)
     generate_pooled_criterion_validity(data_dir, output_dir)
 
-    print("\nAll figures generated.")
+    print("\n" + "=" * 60)
+    print("ELECTRONIC SUPPLEMENTARY MATERIAL (ESM)")
+    print("=" * 60)
+    generate_esm_figures(data_dir, esm_dir)
+
+    print("\nAll figures and ESM generated.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="../output/intermediate")
     parser.add_argument("--output-dir", default="../output/final/figures")
+    parser.add_argument("--esm-dir", default="../output/final/esm")
     args = parser.parse_args()
-    generate_all_figures(args.data_dir, args.output_dir)
+    generate_all_figures(args.data_dir, args.output_dir, args.esm_dir)

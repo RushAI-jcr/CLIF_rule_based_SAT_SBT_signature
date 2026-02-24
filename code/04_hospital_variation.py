@@ -182,10 +182,16 @@ def compute_adjusted_median_odds_ratio(hosp_rates):
 # CATERPILLAR PLOT
 # ============================================================
 
-def caterpillar_plot(hosp_rates, delivery_label, output_path):
+def caterpillar_plot(hosp_rates, delivery_label, output_path, ax=None):
     """Generate caterpillar plot of hospital-level adjusted delivery rates.
 
     JAMA style: Arial font, min 8pt text, legends outside plot.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes, optional
+        If provided, draw on this axis (for embedding in composite figures).
+        If None, creates a standalone figure and saves to output_path.
     """
     df = hosp_rates.sort_values("adjusted_rate").reset_index(drop=True)
     n = len(df)
@@ -216,7 +222,9 @@ def caterpillar_plot(hosp_rates, delivery_label, output_path):
     # aMOR
     amor, amor_lo, amor_hi = compute_adjusted_median_odds_ratio(df)
 
-    fig, ax = plt.subplots(figsize=(10, max(4, n * 0.35)))
+    standalone = ax is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=(10, max(4, n * 0.35)))
 
     # Error bars
     ax.errorbar(
@@ -242,16 +250,15 @@ def caterpillar_plot(hosp_rates, delivery_label, output_path):
         color="#B2182B",
         linestyle="--",
         linewidth=1.2,
-        label=f"Overall rate: {overall_rate:.1%}",
+        label=f"Overall: {overall_rate:.1%}",
     )
 
     ax.set_yticks(range(n))
     ax.set_yticklabels(df["hospital_id"].astype(str), fontsize=8)
-    ax.set_xlabel(f"Risk-adjusted {delivery_label} delivery rate", fontsize=9)
+    ax.set_xlabel(f"Delivery rate", fontsize=9)
     ax.set_title(
-        f"Hospital variation in {delivery_label} delivery\n"
-        f"among eligible ventilator-days",
-        fontsize=11,
+        f"{delivery_label}",
+        fontsize=10,
         fontweight="bold",
     )
 
@@ -277,16 +284,15 @@ def caterpillar_plot(hosp_rates, delivery_label, output_path):
         style="italic",
     )
 
-    # Legend outside plot
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), fontsize=8)
-
+    ax.legend(fontsize=8, loc="lower right")
     ax.set_xlim(-0.05, 1.05)
     ax.grid(axis="x", alpha=0.3)
 
-    plt.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight", dpi=300)
-    plt.close(fig)
-    print(f"  Caterpillar plot saved: {output_path}")
+    if standalone:
+        plt.tight_layout()
+        fig.savefig(output_path, bbox_inches="tight", dpi=300)
+        plt.close(fig)
+        print(f"  Caterpillar plot saved: {output_path}")
 
     return {
         "median_rate": median_rate,
