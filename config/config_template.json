@@ -1,0 +1,6 @@
+{
+    "site_name": "ZYX",
+    "tables_path": "C:/CBA/Downloads/clif/",
+    "file_type": "parquet/csv",
+    "your_site_timezone" : "US/Central" 
+}

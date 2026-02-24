@@ -1,0 +1,29 @@
+# Core data processing
+numpy
+pandas
+pyarrow
+fastparquet
+
+# Statistics and modeling
+scipy
+statsmodels
+scikit-learn
+lifelines
+
+# Visualization
+matplotlib
+seaborn
+
+# Table generation
+tableone
+
+# Data loading
+duckdb
+
+# Jupyter
+jupyter
+ipykernel
+
+# Utilities
+tqdm
+pytz
