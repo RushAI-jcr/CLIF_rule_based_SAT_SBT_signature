@@ -104,22 +104,28 @@ def run_proportion_meta_analysis(
 
     # Build summary on proportion scale
     summary = res.summary_frame().reset_index()
-    summary.columns = [
-        "label", "eff", "sd_eff", "ci_low", "ci_upp",
-        "w_fe", "w_re", "z", "pval",
-    ]
+    # Robust column naming: use actual columns from summary_frame
+    _expected_cols = ["label", "eff", "sd_eff", "ci_low", "ci_upp", "w_fe", "w_re", "z", "pval"]
+    if len(summary.columns) == len(_expected_cols):
+        summary.columns = _expected_cols
+    else:
+        # Fallback: rename by position for the columns we need
+        summary = summary.rename(columns={summary.columns[0]: "label", summary.columns[1]: "eff",
+                                           summary.columns[3]: "ci_low", summary.columns[4]: "ci_upp"})
+        if "sd_eff" not in summary.columns and len(summary.columns) > 2:
+            summary = summary.rename(columns={summary.columns[2]: "sd_eff"})
     # Back-transform to proportion scale
     summary["eff_prop"] = inv_logit(summary["eff"])
     summary["ci_low_prop"] = inv_logit(summary["ci_low"])
     summary["ci_upp_prop"] = inv_logit(summary["ci_upp"])
 
-    # Add pooled row
-    pooled_logit = res.eff_re.eff
+    # Add pooled row — eff_re is a scalar float, not an object
+    pooled_logit = res.eff_re
     pooled_ci = res.conf_int_re()
     pooled = {
         "label": "Pooled (RE)",
         "eff": pooled_logit,
-        "sd_eff": res.sd_eff_re.eff if hasattr(res, "sd_eff_re") else np.nan,
+        "sd_eff": res.sd_eff_re if hasattr(res, "sd_eff_re") else np.nan,
         "ci_low": pooled_ci[0],
         "ci_upp": pooled_ci[1],
         "w_fe": np.nan,
@@ -188,16 +194,20 @@ def run_meta_analysis(
     )
 
     summary = res.summary_frame().reset_index()
-    summary.columns = [
-        "label", "eff", "sd_eff", "ci_low", "ci_upp",
-        "w_fe", "w_re", "z", "pval",
-    ]
+    _expected_cols = ["label", "eff", "sd_eff", "ci_low", "ci_upp", "w_fe", "w_re", "z", "pval"]
+    if len(summary.columns) == len(_expected_cols):
+        summary.columns = _expected_cols
+    else:
+        summary = summary.rename(columns={summary.columns[0]: "label", summary.columns[1]: "eff",
+                                           summary.columns[3]: "ci_low", summary.columns[4]: "ci_upp"})
+        if "sd_eff" not in summary.columns and len(summary.columns) > 2:
+            summary = summary.rename(columns={summary.columns[2]: "sd_eff"})
 
-    # Add pooled row
+    # Add pooled row — eff_re is a scalar float
     pooled = {
         "label": "Pooled (RE)",
-        "eff": res.eff_re.eff,
-        "sd_eff": res.sd_eff_re.eff if hasattr(res, "sd_eff_re") else np.nan,
+        "eff": res.eff_re,
+        "sd_eff": res.sd_eff_re if hasattr(res, "sd_eff_re") else np.nan,
         "ci_low": res.conf_int_re()[0],
         "ci_upp": res.conf_int_re()[1],
         "w_fe": np.nan,
@@ -223,7 +233,7 @@ def sensitivity_leave_one_out(
         res, _ = run_meta_analysis(subset, estimate_col, se_col, label_col)
         results.append({
             "excluded_site": row[label_col],
-            "pooled_eff": res.eff_re.eff,
+            "pooled_eff": res.eff_re,
             "ci_low": res.conf_int_re()[0],
             "ci_upp": res.conf_int_re()[1],
             "i2": getattr(res, "i2", np.nan),
@@ -344,9 +354,9 @@ def jama_forest_plot(
     ax.set_title("Forest plot", fontsize=11, fontweight="bold", fontfamily="Arial")
 
     # Right-side annotations (estimate [CI])
-    for i, row in df.iterrows():
+    for idx, (_, row) in enumerate(df.iterrows()):
         ci_text = f"{row['eff']:.3f} [{row['ci_low']:.3f}, {row['ci_upp']:.3f}]"
-        ax.annotate(ci_text, xy=(ax.get_xlim()[1], y_positions[i]),
+        ax.annotate(ci_text, xy=(ax.get_xlim()[1], y_positions[idx]),
                     fontsize=8, fontfamily="Arial", va="center",
                     xytext=(5, 0), textcoords="offset points")
 

@@ -14,6 +14,7 @@ from definitions_source_of_truth import (
     SBT_PS_MAX,
     SBT_CPAP_MAX,
     VENT_DAY_ANCHOR_HOUR,
+    SBT_CONTROLLED_MODES,
 )
 from sklearn.metrics import (
     accuracy_score,
@@ -36,33 +37,23 @@ def process_cohort_conditions(cohort, How ):
     cohort = cohort.sort_values(['hospitalization_id', 'event_time']).reset_index(drop=True)
     
     # IMV flag
+    # Base conditions: IMV + ICU + controlled mode (CLIF 2.1 mode_category)
+    _base_imv = (
+        (cohort['device_category'] == 'imv') &
+        (cohort['location_category'] == 'icu') &
+        (cohort['mode_category'].str.lower().isin(SBT_CONTROLLED_MODES))
+    )
     if How == 'Standard':
-        cohort['IMV_flag'] = (
-            (cohort['device_category'] == 'imv') &
-            (cohort['location_category'] == 'icu')
-        )
+        cohort['IMV_flag'] = _base_imv
         print('analysis by:',How)
     elif How == 'Respiratory_Stability':
-        cohort['IMV_flag'] = (
-            (cohort['device_category'] == 'imv') &
-            (cohort['location_category'] == 'icu') &
-            (cohort['Respiratory_Stability'] == 1)
-        )
+        cohort['IMV_flag'] = _base_imv & (cohort['Respiratory_Stability'] == 1)
         print('analysis by:',How)
     elif How == 'Hemodynamic_Stability':
-        cohort['IMV_flag'] = (
-            (cohort['device_category'] == 'imv') &
-            (cohort['location_category'] == 'icu') &
-            (cohort['Hemodynamic_Stability_by_NEE'] == 1)
-        )
+        cohort['IMV_flag'] = _base_imv & (cohort['Hemodynamic_Stability_by_NEE'] == 1)
         print('analysis by:',How)
     elif How == 'Both_stabilities':
-        cohort['IMV_flag'] = (
-            (cohort['device_category'] == 'imv') &
-            (cohort['location_category'] == 'icu') &
-            (cohort['Respiratory_Stability'] == 1) &
-            (cohort['Hemodynamic_Stability_by_NEE'] == 1)
-        )
+        cohort['IMV_flag'] = _base_imv & (cohort['Respiratory_Stability'] == 1) & (cohort['Hemodynamic_Stability_by_NEE'] == 1)
         print('analysis by:',How)
     else:
         raise ValueError("Invalid `How` parameter: choose one of "
@@ -181,8 +172,11 @@ def process_diagnostic_flip_sbt_optimized_v2(cohort):
     cond_ps_le8 = cohort['pressure_support_set'] <= 8
     cond_peep_le8 = cohort['peep_set'] <= 8
     conditionA = cond_mode_ps & cond_ps_le8 & cond_peep_le8
+    # T-piece detection: CLIF 2.1 has no standard mode_category for T-piece.
+    # Check mode_name (free text, site-specific) as a best-effort fallback.
+    # Also check if mode_category was already mapped to 'pressure support/cpap' by waterfall.
     mode_name_lower = cohort['mode_name'].fillna('').str.strip().str.lower()
-    cond_mode_tpiece = mode_name_lower.str.match(r'^t[-]?piece$', na=False)
+    cond_mode_tpiece = mode_name_lower.str.match(r'^t[-\s]?piece$', na=False)
     composite = conditionA | cond_mode_tpiece
     passed = cond_imv & cond_icu & composite
 
@@ -234,9 +228,11 @@ def process_diagnostic_flip_sbt_optimized_v2(cohort):
             cumsum = np.cumsum(flip_int)
             cnt_pass = np.empty(n, dtype=int)
             for i in range(n):
-                start = i
                 end = boundaries[i] - 1
-                cnt_pass[i] = cumsum[end] - (cumsum[start-1] if start > 0 else 0)
+                if end < i:
+                    cnt_pass[i] = 0
+                else:
+                    cnt_pass[i] = cumsum[end] - (cumsum[i-1] if i > 0 else 0)
             return (cnt_total == cnt_pass) & group['flip_check_flag'], cnt_total, cnt_pass
 
         # Compute sustained flags for 2 mins, 5 mins, and 30 mins

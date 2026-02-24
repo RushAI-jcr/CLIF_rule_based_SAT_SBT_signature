@@ -4,6 +4,16 @@ import duckdb
 import pandas as pd
 import numpy as np
 import pytz
+from pathlib import Path as _Path
+
+# Load outlier config for threshold enforcement
+_outlier_path = _Path(__file__).resolve().parent.parent / "config" / "outlier_config.json"
+try:
+    with open(_outlier_path, 'r') as f:
+        _outlier_cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError) as e:
+    print(f"WARNING: Could not load outlier_config.json from {_outlier_path}: {e}")
+    _outlier_cfg = {}
 
 
 def load_config():
@@ -62,7 +72,7 @@ def getdttm(df, cutby='min'):
 
     # Remove timezone if present
     if dt_series.dt.tz is not None:
-        dt_series = dt_series.dt.tz_localize(None)
+        dt_series = dt_series.dt.tz_convert(None)
     # If already naive, no conversion needed
 
     # Ceil to the nearest minute if cutby='min'
@@ -103,12 +113,21 @@ def process_resp_support(df):
     for col in float_columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')  # Converts to float and handles non-numeric values
     
-    # # Fix out-of-range values
-    # print("Fixing out-of-range values for 'fio2_set', 'peep_set', and 'resp_rate_set'...")
-    # df['fio2_set'] = df['fio2_set'].where(df['fio2_set'].between(0.21, 1), np.nan)
-    # df['peep_set'] = df['peep_set'].where(df['peep_set'].between(0, 50), np.nan)
-    # df['resp_rate_set'] = df['resp_rate_set'].where(df['resp_rate_set'].between(0, 60), np.nan)
-    
+    # Apply outlier thresholds from config
+    if _outlier_cfg:
+        for col in ['fio2_set', 'peep_set', 'resp_rate_set', 'resp_rate_obs', 'lpm_set']:
+            if col in df.columns and col in _outlier_cfg:
+                lo, hi = _outlier_cfg[col]
+                df[col] = df[col].where(df[col].between(lo, hi), np.nan)
+        print("Applied outlier thresholds to respiratory support columns.")
+
+    # FiO2 rescaling: if mean > 1, site likely reports 0-100 scale instead of 0-1
+    if 'fio2_set' in df.columns:
+        fio2_mean = df['fio2_set'].mean(skipna=True)
+        if fio2_mean and fio2_mean > 1.0:
+            df.loc[df['fio2_set'] > 1, 'fio2_set'] = df.loc[df['fio2_set'] > 1, 'fio2_set'] / 100
+            print(f"FiO2 rescaled from 0-100 to 0-1 (mean was {fio2_mean:.2f})")
+
     # Create 'recorded_date' and 'recorded_hour'
     print('Creating recorded_date and recorded_hour...')
     df['recorded_date'] = df['recorded_dttm'].dt.date
@@ -130,9 +149,9 @@ def process_resp_support(df):
     
     # Fix 'device_category' and 'device_name' based on neighboring records
     print("Fixing 'device_category' and 'device_name' based on neighboring records...")
-    # Create shifted columns once to avoid multiple shifts
-    df['device_category_shifted'] = df['device_category'].shift()
-    df['device_category_shifted_neg'] = df['device_category'].shift(-1)
+    # Create shifted columns once to avoid multiple shifts (groupby to prevent cross-patient contamination)
+    df['device_category_shifted'] = df.groupby('hospitalization_id')['device_category'].shift()
+    df['device_category_shifted_neg'] = df.groupby('hospitalization_id')['device_category'].shift(-1)
     
     condition_prev = (
         df['device_category'].isna() &
@@ -157,7 +176,7 @@ def process_resp_support(df):
     # Handle duplicates and missing data
     print("Handling duplicates and removing rows with all key variables missing...")
     df['n'] = df.groupby(['hospitalization_id', 'recorded_dttm'])['recorded_dttm'].transform('size')
-    df = df[~((df['n'] > 1) & (df['device_category'] == 'nippv'))]
+    df = df[~((df['n'] > 1) & (df['device_category'].isin(['nippv', 'niv'])))]
     df = df[~((df['n'] > 1) & (df['device_category'].isna()))]
     subset_vars = ['device_category', 'device_name', 'mode_category', 'mode_name', 'fio2_set']
     df.dropna(subset=subset_vars, how='all', inplace=True)
@@ -214,15 +233,17 @@ def process_resp_support(df):
     
     # Adjust 'fio2_set' for 'room air' device_category
     print("Adjusting 'fio2_set' for 'room air' device_category...")
-    df['fio2_set'] = np.where(df['fio2_set'].isna() & (df['device_category'] == 'room air'), 0.21, df['fio2_set'])
+    df['fio2_set'] = np.where(df['fio2_set'].isna() & (df['device_category'].isin(['room air', 'room_air'])), 0.21, df['fio2_set'])
     
     # Adjust 'mode_category' for 't-piece' devices
+    # NOTE: T-piece detection via device_name is a known CLIF 2.1 limitation
+    # (device_name is free text). Mapping to 'pressure support/cpap' as closest standard category.
     print("Adjusting 'mode_category' for 't-piece' devices...")
     mask_tpiece = (
         df['mode_category'].isna() &
         df['device_name'].str.contains('t-piece', case=False, na=False)
     )
-    df.loc[mask_tpiece, 'mode_category'] = 'blow by'
+    df.loc[mask_tpiece, 'mode_category'] = 'pressure support/cpap'
     
     # Fill remaining variables within 'mode_name_id'
     print("Filling remaining variables within each 'mode_name_id'...")
@@ -346,7 +367,7 @@ def standardize_datetime_tz(df, dttm_columns, your_timezone):
             df[col] = pd.to_datetime(df[col], errors='coerce')
             # Check if timezone-aware
             if df[col].dt.tz is None:
-                print(f"Column {col} is timezone aware: {df[col].dt.tz}")
+                print(f"Column {col} is timezone-naive (no tz info). Localizing to {your_timezone}.")
                 df[col] = df[col].dt.tz_localize(your_timezone, ambiguous='NaT', nonexistent='shift_forward')
             else:
                 df[col] = df[col].dt.tz_convert(your_timezone)
@@ -538,8 +559,9 @@ def process_resp_support_waterfall(
     )
     _imv_names = device_counts.loc[device_counts["device_category"] == "imv", "device_name"]
     most_common_imv_name = _imv_names.iloc[0] if len(_imv_names) > 0 else "mechanical ventilator"
-    _nippv_names = device_counts.loc[device_counts["device_category"] == "nippv", "device_name"]
-    most_common_nippv_name = _nippv_names.iloc[0] if len(_nippv_names) > 0 else "bipap"
+    # Check both legacy 'nippv' and CLIF 2.1 'niv' for compatibility
+    _niv_names = device_counts.loc[device_counts["device_category"].isin(["nippv", "niv"]), "device_name"]
+    most_common_niv_name = _niv_names.iloc[0] if len(_niv_names) > 0 else "bipap"
 
     mode_counts = (
         rs[["mode_name", "mode_category"]]
@@ -585,14 +607,14 @@ def process_resp_support_waterfall(
     # 1-c  NIPPV heuristics
     prev_cat = rs.groupby(id_col)["device_category"].shift()
     next_cat = rs.groupby(id_col)["device_category"].shift(-1)
-    nippv_like = (
+    niv_like = (
         rs["device_category"].isna()
-        & ((prev_cat == "nippv") | (next_cat == "nippv"))
+        & ((prev_cat.isin(["nippv", "niv"])) | (next_cat.isin(["nippv", "niv"])))
         & rs["peak_inspiratory_pressure_set"].gt(1)
         & rs["pressure_support_set"].gt(1)
     )
-    rs.loc[nippv_like, "device_category"] = "nippv"
-    rs.loc[nippv_like & rs["device_name"].isna(), "device_name"] = most_common_nippv_name
+    rs.loc[niv_like, "device_category"] = "niv"
+    rs.loc[niv_like & rs["device_name"].isna(), "device_name"] = most_common_niv_name
 
     # 1-d  clearly IMV again
     prev_cat = rs.groupby(id_col)["device_category"].shift()
@@ -600,7 +622,7 @@ def process_resp_support_waterfall(
 
     back_to_imv = (
         rs["device_category"].isna()
-        & ~rs["device_name"].str.contains("trach", na=False)
+        & (rs["device_category"] != "tracheostomy")
         & ((prev_cat == "imv") | (next_cat == "imv"))
         & rs["tidal_volume_set"].gt(0)
         & rs["resp_rate_set"].gt(0)
@@ -619,7 +641,7 @@ def process_resp_support_waterfall(
     rs["dup_count"] = rs.groupby([id_col, "recorded_dttm"])["recorded_dttm"].transform(
         "size"
     )
-    rs = rs[~((rs["dup_count"] > 1) & (rs["device_category"] == "nippv"))]
+    rs = rs[~((rs["dup_count"] > 1) & (rs["device_category"].isin(["nippv", "niv"])))]
     rs["dup_count"] = rs.groupby([id_col, "recorded_dttm"])["recorded_dttm"].transform(
         "size"
     )
@@ -631,9 +653,9 @@ def process_resp_support_waterfall(
     lead_dev = rs.groupby(id_col)["device_category"].shift(-1)
     lag_dev = rs.groupby(id_col)["device_category"].shift()
     drop_bipap = (
-        (rs["device_category"] == "nippv")
-        & (lead_dev == "trach collar")
-        & (lag_dev != "nippv")
+        (rs["device_category"].isin(["nippv", "niv"]))
+        & (lead_dev.isin(["tracheostomy", "tracheostomy"]))
+        & (~lag_dev.isin(["nippv", "niv"]))
     )
     rs = rs[~drop_bipap]
 
@@ -719,16 +741,16 @@ def process_resp_support_waterfall(
     p("✦ Phase 3 – numeric down/up-fill inside mode_name_id blocks")
 
     # FiO2 default for room-air
-    ra_mask = (rs["device_category"] == "room air") & rs["fio2_set"].isna()
+    ra_mask = (rs["device_category"].isin(["room air", "room_air"])) & rs["fio2_set"].isna()
     rs.loc[ra_mask, "fio2_set"] = 0.21
 
     # Bad tidal-volume rows → NA
     tv_bad = (
         ((rs["mode_category"] == "pressure support/cpap") & rs["pressure_support_set"].notna())
-        | (rs["mode_category"].isna() & rs["device_name"].str.contains("trach", na=False))
+        | (rs["mode_category"].isna() & (rs["device_category"] == "tracheostomy"))
         | (
             (rs["mode_category"] == "pressure support/cpap")
-            & rs["device_name"].str.contains("trach", na=False)
+            & (rs["device_category"] == "tracheostomy")
         )
     )
     rs.loc[tv_bad, "tidal_volume_set"] = np.nan
@@ -749,8 +771,8 @@ def process_resp_support_waterfall(
     ]
 
     def fill_block(g: pd.DataFrame) -> pd.DataFrame:
-        if (g["device_category"] == "trach collar").any():
-            breaker = (g["device_category"] == "trach collar").cumsum()
+        if (g["device_category"] == "tracheostomy").any():
+            breaker = (g["device_category"] == "tracheostomy").cumsum()
             return (
                 g.groupby(breaker)[num_cols_fill]
                 .apply(lambda x: x.ffill().bfill()).infer_objects(copy=False)
@@ -764,9 +786,10 @@ def process_resp_support_waterfall(
         .apply(fill_block)
     )
 
-    # “t-piece” rows with blank mode_category → classify as blow-by
+    # “t-piece” rows with blank mode_category → closest CLIF 2.1 standard category
+    # NOTE: T-piece detection via device_name is a known CLIF 2.1 limitation (free text)
     tpiece_mask = rs['mode_category'].isna() & rs['device_name'].str.contains('t-piece', na=False)
-    rs.loc[tpiece_mask, 'mode_category'] = 'blow by'
+    rs.loc[tpiece_mask, 'mode_category'] = 'pressure support/cpap'
 
     # Tracheostomy forward-fill only
     rs["tracheostomy"] = rs.groupby(id_col)["tracheostomy"].ffill()

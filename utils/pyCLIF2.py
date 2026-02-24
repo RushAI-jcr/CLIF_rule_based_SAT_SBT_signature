@@ -22,7 +22,12 @@ def load_config():
     
     return config
 
-helper = load_config()
+try:
+    helper = load_config()
+except (FileNotFoundError, json.JSONDecodeError) as e:
+    print(f"WARNING: Could not load config.json: {e}")
+    print("Set pyCLIF2.helper manually or ensure ../config/config.json exists.")
+    helper = {}
 
 def load_parquet_with_tz(file_path, columns=None, filters=None, sample_size=None):
     con = duckdb.connect()
@@ -140,9 +145,9 @@ def convert_datetime_columns_to_site_tz(df, site_tz_str, verbose=True):
                     print(f"{col}: Your timezone is {current_tz}, Converting to your site timezone ({site_tz}).")
                     print(f"{col}: null count after conversion= {df[col].isna().sum()}")
         elif pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].dt.tz_localize(site_tz, ambiguous=True, nonexistent='shift_forward')
             if verbose:
-                df[col] = df[col].dt.tz_localize(site_tz, ambiguous=True, nonexistent='shift_forward')
-                print(f"WARNING: {col}: Naive datetime, NOT converting. Assuming it's in your LOCAL ZONE. Please check ETL!")
+                print(f"WARNING: {col}: Naive datetime, localizing to {site_tz}. Assuming it's in your LOCAL ZONE. Please check ETL!")
         else:
             if verbose:
                 print(f"WARNING: {col}: Not a datetime column. Please check ETL and run again!")
@@ -495,7 +500,7 @@ def stitch_encounters(hospitalization, adt, time_interval=6):
         if hospital_block['encounter_block'].equals(hospital_block['encounter_block'].bfill()):
             break
 
-    hospital_block['encounter_block'] = hospital_block['encounter_block'].bfill(downcast='int')
+    hospital_block['encounter_block'] = hospital_block['encounter_block'].bfill().astype(int)
     hospital_block = pd.merge(hospital_block,hospital_cat,how="left",on="hospitalization_id")
     hospital_block = hospital_block.sort_values(by=["patient_id", "admission_dttm","in_dttm","out_dttm"]).reset_index(drop=True)
     hospital_block = hospital_block.drop_duplicates()
@@ -999,28 +1004,29 @@ def categorize_device(row):
     if pd.notna(row['device_category']):
         return row['device_category']
     elif row['mode_category'] in ["simv", "pressure-regulated volume control", "assist control-volume control"]:
-        return "vent"
+        return "imv"
     elif pd.isna(row['device_category']) and row['fio2_set'] == 0.21 and pd.isna(row['lpm_set']) and pd.isna(row['peep_set']) and pd.isna(row['tidal_volume_set']):
-        return "room air"
+        return "room_air"
     elif pd.isna(row['device_category']) and pd.isna(row['fio2_set']) and row['lpm_set'] == 0 and pd.isna(row['peep_set']) and pd.isna(row['tidal_volume_set']):
-        return "room air"
+        return "room_air"
     elif pd.isna(row['device_category']) and pd.isna(row['fio2_set']) and (0 < row['lpm_set'] <= 20) and pd.isna(row['peep_set']) and pd.isna(row['tidal_volume_set']):
-        return "nasal cannula"
+        return "supplemental_o2"
     elif pd.isna(row['device_category']) and pd.isna(row['fio2_set']) and row['lpm_set'] > 20 and pd.isna(row['peep_set']) and pd.isna(row['tidal_volume_set']):
-        return "high flow nc"
+        return "hfnc"
     elif row['device_category'] == "nasal cannula" and pd.isna(row['fio2_set']) and row['lpm_set'] > 20:
-        return "high flow nc"
+        return "hfnc"
     else:
         return row['device_category']  # Keep original value if no condition is met
 
 # Try to fill in FiO2 based on other values    
 def refill_fio2(row):
     if pd.notna(row['fio2_set']):
-        return row['fio2_set']/100
-    elif pd.isna(row['fio2_set']) and row['device_category'] == "room air":
-        return 0.21 
-    elif pd.isna(row['fio2_set']) and row['device_category'] == "nasal cannula" and pd.notna(row['lpm_set']):
-        return (0.24 + (0.04 * row['lpm_set'])) 
+        # Only rescale if value appears to be on 0-100 scale
+        return row['fio2_set'] / 100 if row['fio2_set'] > 1.0 else row['fio2_set']
+    elif pd.isna(row['fio2_set']) and row['device_category'] in ("room air", "room_air"):
+        return 0.21
+    elif pd.isna(row['fio2_set']) and row['device_category'] in ("nasal cannula", "supplemental_o2") and pd.notna(row['lpm_set']):
+        return min(1.0, 0.24 + (0.04 * row['lpm_set']))
     else:
         return np.nan
 

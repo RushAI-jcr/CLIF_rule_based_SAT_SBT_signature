@@ -38,8 +38,14 @@ logger.setLevel(logging.INFO)
 # Outlier config file
 ##############################################################################
 
-with open('../config/outlier_config.json', 'r') as f:
-    outlier_cfg = json.load(f)
+from pathlib import Path as _Path
+_outlier_path = _Path(__file__).resolve().parent.parent / "config" / "outlier_config.json"
+try:
+    with open(_outlier_path, 'r') as f:
+        outlier_cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError) as e:
+    print(f"WARNING: Could not load outlier_config.json from {_outlier_path}: {e}")
+    outlier_cfg = {}
 
 
 ##############################################################################
@@ -67,9 +73,14 @@ def compute_sofa(
     else:
         if id_mapping is None:
             raise ValueError("id_mapping required when use_hospitalization_id=False")
-        ids = ids.merge(id_mapping, left_on='hospitalization_id', right_on='encounter_block',  how='left')
-        ids = ids.drop(columns=['hospitalization_id_x'])
-        ids = ids.rename(columns={'hospitalization_id_y': 'hospitalization_id'})
+        ids = ids.merge(id_mapping, left_on='hospitalization_id', right_on='encounter_block',  how='left', suffixes=('_orig', ''))
+        # Drop the original hospitalization_id (from ids) and keep the one from id_mapping
+        if 'hospitalization_id_orig' in ids.columns:
+            ids = ids.drop(columns=['hospitalization_id_orig'])
+        elif 'hospitalization_id_x' in ids.columns:
+            ids = ids.drop(columns=['hospitalization_id_x'])
+            if 'hospitalization_id_y' in ids.columns:
+                ids = ids.rename(columns={'hospitalization_id_y': 'hospitalization_id'})
         ids['hospitalization_id'] = ids['hospitalization_id'].astype(str)
         id_col = group_by_id
         print('using id_col will be used for groupbyz:',id_col)
@@ -126,12 +137,12 @@ def compute_sofa(
         (lab_sub['lab_order_dttm'] <= lab_sub['stop_dttm'])
     ]
     # Aggregate by time bucket
-    lab_summary = (
-        lab_sub
-        .groupby([id_col, 'lab_category'])['lab_value_numeric']
-        .agg(lambda x: x.min() if x.name in ["po2_arterial", "platelet_count"] else x.max())
-        .reset_index()
-    )
+    # Aggregate labs: min for po2_arterial/platelet_count (worst = lowest), max for others
+    _lab_min = lab_sub[lab_sub['lab_category'].isin(['po2_arterial', 'platelet_count'])]
+    _lab_max = lab_sub[~lab_sub['lab_category'].isin(['po2_arterial', 'platelet_count'])]
+    _lab_min_agg = _lab_min.groupby([id_col, 'lab_category'])['lab_value_numeric'].min().reset_index()
+    _lab_max_agg = _lab_max.groupby([id_col, 'lab_category'])['lab_value_numeric'].max().reset_index()
+    lab_summary = pd.concat([_lab_min_agg, _lab_max_agg], ignore_index=True)
 
     lab_summary = lab_summary.pivot(
         index=id_col,
@@ -143,9 +154,9 @@ def compute_sofa(
     for lab in lab_categories:
         if lab not in lab_summary.columns:
             print(
-                'WARNING: Your CLIF dont have : ', Lab, ' PLEASE check your ETL!'
+                f'WARNING: Your CLIF does not have: {lab}. PLEASE check your ETL!'
             )
-            lab_summary[med] = np.nan
+            lab_summary[lab] = np.nan
 
     # Rename columns to indicate aggregation function used
     lab_summary = lab_summary.rename(columns={
@@ -291,11 +302,18 @@ def compute_sofa(
                "dopamine","angiotensin","dobutamine","milrinone"]
     meds = pyCLIF2.load_data('clif_medication_admin_continuous',
                      columns=['hospitalization_id','admin_dttm','med_category',
-                              'med_dose','med_dose_unit'],
+                              'med_dose','med_dose_unit','mar_action_group'],
                      filters={'hospitalization_id':hosp_list,
                               'med_category': vp_meds})
     meds = pyCLIF2.convert_datetime_columns_to_site_tz(meds, pyCLIF2.helper['your_site_timezone'])
     meds['hospitalization_id'] = meds['hospitalization_id'].astype(str)
+    # CLIF 2.1: filter to administered records only
+    if 'mar_action_group' in meds.columns:
+        _before = len(meds)
+        meds = meds[meds['mar_action_group'].str.lower() == 'administered']
+        logger.info("mar_action_group filter: %d -> %d rows", _before, len(meds))
+    else:
+        logger.warning("mar_action_group column missing from medication_admin_continuous — cannot filter to administered only")
     logger.info("Loaded %d med rows", len(meds))
 
     # get weights from vitals for dose conversion
@@ -414,16 +432,27 @@ def compute_sofa(
     resp_new= resp_new[[id_col, 'hospitalization_id', 'recorded_dttm', 'mode_category', 
                         'device_category', 'fio2_combined', 'fio2_set', 'tidal_volume_set', 'peep_set', 'lpm_set']]
     # Define device ranking
+    # Normalize legacy device_category values to CLIF 2.1 vocabulary
+    _device_normalize = {
+        'nippv': 'niv',
+        'cpap': 'niv',
+        'high flow nc': 'hfnc',
+        'face mask': 'supplemental_o2',
+        'nasal cannula': 'supplemental_o2',
+        'trach collar': 'tracheostomy',
+    }
+    resp_new['device_category'] = resp_new['device_category'].replace(_device_normalize)
+
+    # CLIF 2.1 device severity ranking
     device_rank_dict = {
         'imv': 1,
-        'nippv': 2,
-        'cpap': 3,
-        'high flow nc': 4,
-        'face mask': 5,
-        'trach collar': 6,
-        'nasal cannula': 7,
-        'other': 8,
-        'room air': 9
+        'niv': 2,
+        'hfnc': 3,
+        'supplemental_o2': 4,
+        'tracheostomy': 5,
+        'room_air': 6,
+        'room air': 6,
+        'other': 7,
     }
 
     # Apply device ranking
@@ -543,8 +572,8 @@ def compute_sofa(
 
 
     conditions = [
-        (sofa_df['p_f'] < 100) & sofa_df['resp_support_max'].isin(["nippv", "cpap", "imv"]), #4
-        (sofa_df['p_f'] < 200) & (sofa_df['p_f'] >= 100) & sofa_df['resp_support_max'].isin(["nippv", "cpap", "imv"]), #3
+        (sofa_df['p_f'] < 100) & sofa_df['resp_support_max'].isin(["niv", "imv"]), #4
+        (sofa_df['p_f'] < 200) & (sofa_df['p_f'] >= 100) & sofa_df['resp_support_max'].isin(["niv", "imv"]), #3
         (sofa_df['p_f'] < 300) & (sofa_df['p_f'] >= 200), #2
         (sofa_df['p_f'] < 400) & (sofa_df['p_f'] >= 300), #1
     ]
@@ -556,8 +585,8 @@ def compute_sofa(
 
 
     conditions = [
-        (sofa_df['p_f_imputed'] < 100) & sofa_df['resp_support_max'].isin(["nippv", "cpap", "imv"]), #4
-        (sofa_df['p_f_imputed'] < 200) & (sofa_df['p_f_imputed'] >= 100) & sofa_df['resp_support_max'].isin(["nippv", "cpap", "imv"]), #3
+        (sofa_df['p_f_imputed'] < 100) & sofa_df['resp_support_max'].isin(["niv", "imv"]), #4
+        (sofa_df['p_f_imputed'] < 200) & (sofa_df['p_f_imputed'] >= 100) & sofa_df['resp_support_max'].isin(["niv", "imv"]), #3
         (sofa_df['p_f_imputed'] < 300) & (sofa_df['p_f_imputed'] >= 200), #2
         (sofa_df['p_f_imputed'] < 400) & (sofa_df['p_f_imputed'] >= 300), #1
     ]
@@ -568,7 +597,7 @@ def compute_sofa(
     sofa_df['sofa_resp_pf_imp'] = np.select(conditions, values, default=0)
 
     # if both column is NaN return Nan
-    sofa_df['sofa_resp'] = sofa_df.apply(lambda x: np.nanmax([x['sofa_resp_pf'], x['sofa_resp_pf_imp']]), axis=1)
+    sofa_df['sofa_resp'] = sofa_df[['sofa_resp_pf', 'sofa_resp_pf_imp']].max(axis=1)
 
     #######################################################################
     ######################     SOFA CNS  ##################################
@@ -620,10 +649,11 @@ def compute_sofa(
             on='hospitalization_id', 
             how='inner'
         )
-        # Filter labs within time window
+        # Filter within time window — CLIF 2.1 crrt_therapy may use start_dttm/stop_dttm or recorded_dttm
+        _crrt_time_col = 'recorded_dttm' if 'recorded_dttm' in crrt_sub.columns else 'start_dttm'
         crrt_sub = crrt_sub[
-            (crrt_sub['recorded_dttm'] >= (crrt_sub['start_dttm'] - pd.Timedelta(hours=72))) & 
-            (crrt_sub['recorded_dttm'] <= crrt_sub['stop_dttm'])
+            (crrt_sub[_crrt_time_col] >= (crrt_sub['start_dttm_y'] if 'start_dttm_y' in crrt_sub.columns else crrt_sub['start_dttm']) - pd.Timedelta(hours=72)) &
+            (crrt_sub[_crrt_time_col] <= (crrt_sub['stop_dttm_y'] if 'stop_dttm_y' in crrt_sub.columns else crrt_sub['stop_dttm']))
         ]
 
         crrt_final = crrt_sub[[id_col]].drop_duplicates()
