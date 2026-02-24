@@ -642,7 +642,10 @@ def generate_esm_tables(data_dir, output_dir):
     # eTable 1: Construct validity outcomes
     outcomes_path = os.path.join(data_dir, "final", "construct_validity_outcomes.csv")
     if os.path.exists(outcomes_path):
-        df = pd.read_csv(outcomes_path)
+        try:
+            df = pd.read_csv(outcomes_path)
+        except (pd.errors.EmptyDataError, pd.errors.ParserError):
+            df = pd.DataFrame()
         # Format for publication: round, add CI strings
         for est_col, lo_col, hi_col in [
             ("HR", "HR_lower_95", "HR_upper_95"),
