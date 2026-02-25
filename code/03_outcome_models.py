@@ -435,11 +435,13 @@ def _fit_cause_specific_cox(
         return _placeholder_result(f"{model_label} (too few events)", model_family="cox")
 
     # penalizer=0.1 adds L2 regularisation; helps convergence with hospital dummies
-    # robust=True + cluster_col for hospitalization-level robust SE [SAP 2.2]
+    # robust=True + cluster_col at hospital level for cluster-robust SE [SAP 2.2]
+    # Note: clustering at hospitalization level is trivial (one subject per cluster);
+    # hospital-level clustering accounts for within-hospital correlation.
     ctv = CoxTimeVaryingFitter(penalizer=0.1)
     ctv.fit(fit_df, id_col="hospitalization_id",
             start_col="start", stop_col="stop", event_col="event",
-            robust=True, cluster_col="hospitalization_id")
+            robust=True, cluster_col="hospital_id")
     # Note: lifelines does not support true random effects. Hospital dummies
     # with L2 penalty approximate a fixed-effects frailty model [SAP 2.2 limitation].
 
@@ -843,9 +845,12 @@ def fit_icu_los_model(
         all_covs = covariates_formula + hospital_dummies
         X = sm.add_constant(model_df[all_covs], has_constant="add")
         y = model_df["icu_los"]
+        # Cluster on hospital_id: each hospitalization is one row, so hospitalization_id
+        # clustering is degenerate (one obs per group). Hospital-level clustering accounts
+        # for within-hospital correlation [SAP 2.2-2.5].
         gee = GEE(
             y, X,
-            groups=model_df["hospitalization_id"],
+            groups=model_df["hospital_id"],
             family=NBFamily(),
             cov_struct=Exchangeable(),
         )
@@ -863,7 +868,7 @@ def fit_icu_los_model(
             "IRR_lower_95": round(float(np.exp(coef - 1.96 * se)), 3),
             "IRR_upper_95": round(float(np.exp(coef + 1.96 * se)), 3),
             "p_value": round(pval, 4),
-            "n_clusters": int(model_df["hospitalization_id"].nunique()),
+            "n_clusters": int(model_df["hospital_id"].nunique()),
             "n_hospital_dummies": len(hospital_dummies),
         }
     except Exception as e:
@@ -968,8 +973,9 @@ def fit_mortality_model(
 
             X = sm.add_constant(model_df[covariates_formula], has_constant="add")
             y = model_df["died"].astype(int)
-            # Cluster on hospitalization_id per SAP 2.2-2.5
-            gee_groups = model_df["hospitalization_id"] if "hospitalization_id" in model_df.columns else model_df["hospital_id"]
+            # Cluster on hospital_id: each hospitalization is one row, so
+            # hospitalization_id clustering is degenerate [SAP 2.2-2.5]
+            gee_groups = model_df["hospital_id"]
             gee = GEE(
                 y,
                 X,

@@ -70,7 +70,13 @@ def _build_hosp_dataset(day_level_df: pd.DataFrame, exposure_col: str) -> pd.Dat
         else:
             hosp["died"] = 0
 
-    hosp["event_type"] = np.where(hosp["died"] == 1, 2, 1)
+    # Event coding: 1 = extubation (event of interest), 2 = death (competing event),
+    # 0 = censored (still ventilated at end of follow-up / discharged on MV)
+    hosp["extubated"] = (hosp["died"] == 0).astype(int)  # simplified: alive at discharge = extubated
+    hosp["event_type"] = np.where(
+        hosp["died"] == 1, 2,
+        np.where(hosp["extubated"] == 1, 1, 0)  # 0 = censored
+    )
     hosp["time_to_event"] = hosp["total_vent_days"].fillna(1).clip(lower=1).astype(int)
     hosp["sex_male"] = (hosp.get("sex_category", "").astype(str).str.lower() == "male").astype(int)
     hosp["race_white"] = hosp.get("race_category", "").astype(str).str.lower().str.contains("white", na=False).astype(int)
@@ -206,7 +212,7 @@ def fit_fine_gray_equivalent(
             shr, lo, hi, pval = (None, None, None, None)
 
         result = CompetingRiskSummary(
-            model="Fine-Gray equivalent - extubation alive by day 28",
+            model="Fine-Gray approximation - extubation alive by day 28",
             estimator="discrete_time_subdistribution_cloglog",
             exposure_col=exposure_col,
             shr=round(shr, 4) if shr is not None else None,
@@ -214,7 +220,8 @@ def fit_fine_gray_equivalent(
             shr_upper_95=round(hi, 4) if hi is not None else None,
             p_value=round(pval, 4) if pval is not None else None,
             n_hospitalizations=int(len(hosp)),
-            note=None,
+            note="Discrete-time cloglog approximation to Fine-Gray sHR; "
+                 "lacks IPCW weights. Use rpy2 cmprsk::crr() for primary analysis.",
         )
     except Exception as exc:  # pragma: no cover
         result = CompetingRiskSummary(

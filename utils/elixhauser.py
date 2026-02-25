@@ -105,8 +105,17 @@ def _normalize_icd10(code: str) -> str:
 
 
 def _code_matches(code: str, pattern: re.Pattern[str]) -> bool:
-    """Test a single ICD code against a compiled pattern (dot-inclusive)."""
-    return bool(pattern.match(code.strip()))
+    """Test a single ICD code against a compiled pattern.
+
+    Matches both dotted (I50.9) and dot-free (I509) codes by testing
+    the raw code first, then the normalized (dot-stripped) form.
+    """
+    c = code.strip() if isinstance(code, str) else ""
+    if not c:
+        return False
+    # Try raw code first (handles dotted codes matching dot-inclusive patterns),
+    # then try normalized form (handles dot-free codes)
+    return bool(pattern.match(c)) or bool(pattern.match(_normalize_icd10(c)))
 
 
 def compute_elixhauser_van_walraven(dx_df: pd.DataFrame) -> pd.DataFrame:

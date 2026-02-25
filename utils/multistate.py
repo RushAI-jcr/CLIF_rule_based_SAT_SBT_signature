@@ -168,22 +168,28 @@ def _build_person_period_extubated_to_dead(
 ) -> pd.DataFrame:
     """Build person-period records for Extubated -> Dead transition.
 
-    At-risk population: patients who were extubated alive (left MV alive at some point),
-    identified as those who died == 1 — they exited MV alive (extubated) but subsequently
-    died before discharge. This is the complement of Extubated_to_Reintubated's at-risk pool.
+    At-risk population: ALL patients who were extubated alive (exited MV alive),
+    not just those who subsequently died. This includes patients who survived to
+    discharge (censored) and those who died after extubation (events).
 
-    The event time is approximated as the first period after the MV exit window, mirroring
-    the structure used in _build_person_period_extubated_to_reintubated. All patients in
-    this pool experienced the event (death), so is_event == 1 for every record.
+    Event: death after extubation (died==1 AND was extubated).
+    Censored: extubated and survived to discharge (died==0).
     """
     rows: list[dict[str, Any]] = []
-    # Patients who died had to exit MV at some point; if they died without reintubation
-    # they were extubated then died. Include all died==1 patients as the at-risk pool.
-    extubated_then_dead = hosp_df[hosp_df["died"] == 1].copy()
-    for row in extubated_then_dead.itertuples(index=False):
+    # At-risk: all patients who exited MV alive (extubated).
+    # Approximation: patients with time_to_mv_exit < horizon who were not reintubated,
+    # OR all patients who survived MV (regardless of reintubation status).
+    # Use: died==0 (survived = definitely extubated) + died==1 & reintubated==0
+    # (died after extubation without reintubation).
+    extubated_pool = hosp_df[
+        (hosp_df["died"] == 0) |
+        ((hosp_df["died"] == 1) & (hosp_df["reintubated"] == 0))
+    ].copy()
+    for row in extubated_pool.itertuples(index=False):
         t_exit = int(min(max(getattr(row, "time_to_mv_exit"), 1), horizon))
         start_t = min(t_exit + 1, horizon)
-        event_time = min(start_t + 1, horizon)
+        is_event = int(getattr(row, "died", 0))
+        event_time = min(start_t + 1, horizon) if is_event else horizon + 1
         for t in range(start_t, horizon + 1):
             rows.append(
                 {
@@ -195,8 +201,8 @@ def _build_person_period_extubated_to_dead(
                     "race_white": int(getattr(row, "race_white")),
                     "time_day": t,
                     "log_time": float(np.log(max(t, 1))),
-                    # All patients in this pool died, so event fires at event_time
-                    "event": int(t == event_time),
+                    # Event fires at event_time for deaths; censored patients never fire
+                    "event": int(is_event == 1 and t == event_time),
                 }
             )
     return pd.DataFrame(rows)
