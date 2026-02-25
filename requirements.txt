@@ -1,6 +1,7 @@
 # Core data processing
 numpy
 pandas
+polars
 pyarrow
 fastparquet
 
@@ -20,7 +21,8 @@ tableone
 # Data loading
 duckdb
 
-# Jupyter
+# Notebooks
+marimo
 jupyter
 ipykernel
 
