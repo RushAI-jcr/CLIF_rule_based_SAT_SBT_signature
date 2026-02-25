@@ -47,6 +47,86 @@ This SAP covers:
 - Sensitivity analyses
 - Multiplicity considerations
 
+### 1.4 Full Analytic Research Plan
+
+```mermaid
+flowchart TB
+    subgraph DATA["Data Sources"]
+        CLIF[("CLIF 2.1\nHarmonized EHR")]
+        FLOW[("Flowsheet\nDocumentation")]
+    end
+
+    subgraph COHORT["Cohort Construction (Script 00)"]
+        C1[All hospitalizations\n2022-2024]
+        C2[Age 18-119\nwith ICU admission]
+        C3[IMV >= 6 hours]
+        C4[Ventilator-day\nassignment\n06:00 anchor]
+        C1 --> C2 --> C3 --> C4
+    end
+
+    subgraph PHENO["Phenotyping (Scripts 01-02)"]
+        direction LR
+        SAT_E[SAT Eligibility\n- Sedatives >= 4h\n- No paralytics\n- RASS < 2]
+        SAT_D[SAT Delivery\n- Complete: all off >= 30m\n- Modified: seds off >= 30m]
+        SBT_E[SBT Eligibility\n- Controlled mode >= 12h\n- FiO2 <= 50%, PEEP <= 8\n- NEE <= 0.2]
+        SBT_D[SBT Delivery\n- Support mode >= 2m\n- PS <= 8, CPAP <= 8]
+        SAT_E --> SAT_D
+        SBT_E --> SBT_D
+    end
+
+    subgraph VALID["Validation Framework"]
+        direction TB
+        CV["Criterion Validity\n(Section 4)"]
+        CONVAL["Construct Validity\n(Section 5)"]
+        HOSP["Hospital Variation\n(Section 6)"]
+    end
+
+    subgraph CV_DETAIL["Criterion Validity Analyses"]
+        CONF[2x2 Confusion Matrix\nSens, Spec, PPV, NPV, F1]
+        BOOT[Cluster Bootstrap\n1000 BCa replicates\nat episode level]
+        META_CV[Site-stratified\nForest plots, I-squared]
+        CONF --> BOOT --> META_CV
+    end
+
+    subgraph CONVAL_DETAIL["Construct Validity Analyses"]
+        COX["Time to Extubation\nCause-specific Cox PH\nTime-varying exposure\ncsHR"]
+        VFD["Ventilator-Free Days\nFine-Gray primary (sHR)\nMultistate secondary"]
+        LOS["ICU Length of Stay\nMixed-effects NB\nIRR"]
+        MORT["In-Hospital Mortality\nMixed-effects Logistic\nOR"]
+        FOUR["Paired SAT+SBT\n4-level exposure\nAll outcomes"]
+    end
+
+    subgraph HOSP_DETAIL["Hospital Variation Analyses"]
+        RSR[Risk-Standardized Rates\nHierarchical logistic]
+        MOR_CALC[Median Odds Ratio\nICC]
+        VIZ[Caterpillar plots\nFunnel plots]
+        AGREE[EHR vs Flowsheet\nBland-Altman, CCC]
+        RSR --> MOR_CALC --> VIZ --> AGREE
+    end
+
+    subgraph SENS["Sensitivity Analyses (Section 8)"]
+        THR[Alternative thresholds\nSAT: 15/30/60 min\nSBT: 2/5/30 min, PS 5/8/10]
+        POP[Population restrictions\nExcl day 0-1, cardiac arrest\ncomfort care, TTM, first ep only]
+        VFD_SENS[VFD alternatives\nMann-Whitney, prop odds\nhurdle, ZINB]
+        COMP[Data completeness\n>= 90% threshold]
+    end
+
+    CLIF --> COHORT
+    FLOW --> CV
+    COHORT --> PHENO
+    PHENO --> VALID
+    CV --> CV_DETAIL
+    CONVAL --> CONVAL_DETAIL
+    HOSP --> HOSP_DETAIL
+    CONVAL_DETAIL --> SENS
+
+    style DATA fill:#e1f5fe
+    style COHORT fill:#fff3e0
+    style PHENO fill:#e8f5e9
+    style VALID fill:#fce4ec
+    style SENS fill:#f3e5f5
+```
+
 ---
 
 ## 2. Study Design and Data Architecture
@@ -62,6 +142,48 @@ Level 5: Health System (k systems)
     Level 3: Patient / Hospitalization (i patients)
       Level 2: Ventilation Episode (e episodes per patient)
         Level 1: Ventilator-Day (d days per episode)
+```
+
+```mermaid
+graph TB
+    HS["Health System (k)"] --> H1["Hospital A"]
+    HS --> H2["Hospital B"]
+    HS --> H3["Hospital ..."]
+    H1 --> P1["Patient 1"]
+    H1 --> P2["Patient 2"]
+    H2 --> P3["Patient 3"]
+    P1 --> E1["Episode 1"]
+    P1 --> E2["Episode 2"]
+    P2 --> E3["Episode 1"]
+    P3 --> E4["Episode 1"]
+    E1 --> D1["Day 1"]
+    E1 --> D2["Day 2"]
+    E1 --> D3["Day 3"]
+    E2 --> D4["Day 1"]
+    E2 --> D5["Day 2"]
+    E3 --> D6["Day 1"]
+    E4 --> D7["Day 1"]
+    E4 --> D8["Day 2"]
+
+    style HS fill:#1a237e,color:#fff
+    style H1 fill:#283593,color:#fff
+    style H2 fill:#283593,color:#fff
+    style H3 fill:#283593,color:#fff
+    style P1 fill:#1565c0,color:#fff
+    style P2 fill:#1565c0,color:#fff
+    style P3 fill:#1565c0,color:#fff
+    style E1 fill:#2e7d32,color:#fff
+    style E2 fill:#2e7d32,color:#fff
+    style E3 fill:#2e7d32,color:#fff
+    style E4 fill:#2e7d32,color:#fff
+    style D1 fill:#f57f17
+    style D2 fill:#f57f17
+    style D3 fill:#f57f17
+    style D4 fill:#f57f17
+    style D5 fill:#f57f17
+    style D6 fill:#f57f17
+    style D7 fill:#f57f17
+    style D8 fill:#f57f17
 ```
 
 **Rationale:** Correctly modeling this hierarchy is critical. Ventilator-days within the same episode are correlated (same patient, same illness trajectory). Episodes within the same hospitalization share patient-level confounders. Hospitals share institutional practices and culture. Failure to account for any level produces biased variance estimates.
@@ -80,6 +202,27 @@ Level 5: Health System (k systems)
 
 A ventilator-day is defined as a 24-hour period from 06:00 to 05:59 the following day. Eligibility assessment windows span 22:00 the prior calendar day to 06:00 on the index day.
 
+```mermaid
+gantt
+    title Ventilator-Day Timeline (Index Day d)
+    dateFormat HH:mm
+    axisFormat %H:%M
+
+    section Prior Day
+    Prior calendar day              :done, 00:00, 22:00
+
+    section Eligibility Window
+    Eligibility assessment (22:00-06:00) :active, elig, 22:00, 08:00
+
+    section Index Ventilator-Day
+    Vent-day d (06:00-05:59+1)       :crit, vd, 06:00, 24:00
+
+    section Clinical Workflow
+    Morning rounds / SAT-SBT decision :milestone, 06:00, 0h
+```
+
+> **Key:** The eligibility window (22:00-06:00, orange) precedes the ventilator-day anchor (06:00, red), ensuring eligibility is assessed from the prior overnight period before the clinical decision point.
+
 **Rationale:** This anchoring aligns with real-world ICU workflow where SAT/SBT screening occurs during morning rounds. The overnight assessment window (22:00-06:00) captures the most recent physiologic state prior to the clinical decision point, minimizing:
 - **Immortal time bias:** By assessing eligibility before the decision point, we avoid conditioning on future events
 - **Reverse causation:** Physiologic changes occurring *after* a trial (e.g., hemodynamic instability during an SBT) do not contaminate the eligibility assessment
@@ -89,6 +232,52 @@ A ventilator-day is defined as a 24-hour period from 06:00 to 05:59 the followin
 IMV episodes are defined as contiguous periods of ventilator-mode/setting documentation, with a gap of >72 hours of absent ventilator support distinguishing separate episodes. Minimum IMV duration: 6 hours.
 
 **Rationale:** The 72-hour gap threshold is consistent with prior critical care literature (e.g., WEAN SAFE, Pham et al., *Lancet Respir Med* 2023) and prevents brief interruptions (e.g., for transport or procedures) from splitting a single clinical episode. The 6-hour minimum excludes peri-procedural ventilation that is not relevant to the weaning paradigm.
+
+### 2.6 CONSORT Flow Diagram
+
+```mermaid
+flowchart TB
+    A["All hospitalizations in CLIF\n2022-01-01 to 2024-12-31"] --> B["Age >= 18 and <= 119"]
+    B --> C["At least 1 ICU admission\n(ADT location_category)"]
+    C --> D["Any invasive mechanical ventilation\n(device_category = 'IMV')"]
+    D --> E["IMV episode >= 6 hours\n(gap threshold: 72h)"]
+    E --> F["Study Cohort\nn patients, n hospitalizations,\nn IMV episodes, n ventilator-days"]
+
+    B -->|Excluded| B_ex["Age < 18 or > 119"]
+    C -->|Excluded| C_ex["No ICU admission"]
+    D -->|Excluded| D_ex["No IMV records"]
+    E -->|Excluded| E_ex["IMV < 6 hours\n(peri-procedural)"]
+
+    F --> G["SAT Eligibility Assessment\n(22:00-06:00 window)"]
+    F --> H["SBT Eligibility Assessment\n(22:00-06:00 window)"]
+
+    G --> G1["SAT Eligible\n- Continuous sedative/opioid >= 4h\n- No paralytics\n- RASS < 2"]
+    G --> G2["SAT Not Eligible"]
+    G1 --> G3["SAT Delivered\n(EHR phenotype)"]
+    G1 --> G4["SAT Not Delivered"]
+
+    H --> H1["SBT Eligible\n- Controlled mode >= 12h\n- Resp stable\n- Hemo stable"]
+    H --> H2["SBT Not Eligible"]
+    H1 --> H3["SBT Delivered\n(EHR phenotype)"]
+    H1 --> H4["SBT Not Delivered"]
+
+    subgraph FLOWSHEET["Criterion Validity Subset"]
+        G3 --> CV_SAT["SAT: EHR vs Flowsheet\n(hospitals with flowsheet data)"]
+        H3 --> CV_SBT["SBT: EHR vs Flowsheet\n(hospitals with flowsheet data)"]
+    end
+
+    style A fill:#e3f2fd
+    style F fill:#e8f5e9,stroke:#2e7d32,stroke-width:3px
+    style B_ex fill:#ffebee
+    style C_ex fill:#ffebee
+    style D_ex fill:#ffebee
+    style E_ex fill:#ffebee
+    style G1 fill:#c8e6c9
+    style G2 fill:#ffcdd2
+    style H1 fill:#c8e6c9
+    style H2 fill:#ffcdd2
+    style FLOWSHEET fill:#fff8e1
+```
 
 ---
 
@@ -174,6 +363,43 @@ Because flowsheet documentation is an imperfect gold standard, we augment criter
 
 If phenotype-identified delivery is associated with these outcomes in the expected direction, this provides evidence that the phenotype captures a clinically meaningful construct, even if imperfectly aligned with flowsheet documentation.
 
+```mermaid
+flowchart TB
+    EXP["Exposure: SAT/SBT Delivery\n(time-varying, day-level)"]
+
+    EXP --> COX["Time to Extubation\nCause-specific Cox PH\nEffect: csHR"]
+    EXP --> FG["Ventilator-Free Days\nFine-Gray (primary)\nEffect: sHR"]
+    EXP --> MS_M["VFD Multistate\n(secondary)\nTransition HRs"]
+    EXP --> NB["ICU Length of Stay\nMixed-effects NB\nEffect: IRR"]
+    EXP --> LOG["In-Hospital Mortality\nMixed-effects Logistic\nEffect: OR"]
+    EXP --> FOUR["Paired SAT+SBT\n4-level categorical\nAll outcomes"]
+
+    COX -->|"Expected: csHR > 1\n(faster extubation)"| OUT1["Shorter time\non ventilator"]
+    FG -->|"Expected: sHR > 1\n(higher CIF)"| OUT2["More VFDs"]
+    NB -->|"Expected: IRR < 1\n(shorter stay)"| OUT3["Shorter\nICU LOS"]
+    LOG -->|"Expected: OR < 1\n(lower mortality)"| OUT4["Lower\nmortality"]
+
+    subgraph CONFOUNDERS["Confounder Adjustment (all models)"]
+        direction LR
+        C1["Age, sex,\nrace/ethnicity, BMI"]
+        C2["Elixhauser score"]
+        C3["Prior-day FiO2,\nPEEP, NEE, RASS, GCS"]
+        C4["Medical vs\nsurgical admission"]
+    end
+
+    CONFOUNDERS -.-> COX
+    CONFOUNDERS -.-> FG
+    CONFOUNDERS -.-> NB
+    CONFOUNDERS -.-> LOG
+
+    style EXP fill:#1565c0,color:#fff
+    style CONFOUNDERS fill:#f5f5f5
+    style OUT1 fill:#c8e6c9
+    style OUT2 fill:#c8e6c9
+    style OUT3 fill:#c8e6c9
+    style OUT4 fill:#c8e6c9
+```
+
 ### 5.2 Time to Extubation: Cause-Specific Cox Proportional Hazards Model
 
 **Model:**
@@ -226,6 +452,27 @@ $$\lambda^{sub}_1(t | X) = \lambda^{sub}_{10}(t) \cdot \exp(\beta_1 \cdot \text{
 **Secondary Model: Multistate Model**
 
 A multistate model capturing the full clinical trajectory: mechanical ventilation → extubated → reintubated → dead. This model captures reintubation cycles and provides transition-specific hazard ratios.
+
+```mermaid
+stateDiagram-v2
+    [*] --> IMV: Intubation
+    IMV --> Extubated: Transition 1\n(extubation)
+    IMV --> Dead: Transition 2\n(death on vent)
+    Extubated --> Reintubated: Transition 3\n(reintubation)
+    Extubated --> Dead: Transition 4\n(death after extubation)
+    Reintubated --> Extubated: Transition 5\n(re-extubation)
+    Reintubated --> Dead: Transition 6\n(death after reintubation)
+
+    note right of IMV
+        Entry state for all patients
+        Time-varying SAT/SBT exposure
+    end note
+
+    note right of Dead
+        Absorbing state
+        Competing risk for extubation
+    end note
+```
 
 **Rationale:** Endorsed by Renard Triché et al. (2025) as the optimal approach for VFD-type outcomes. Published precedent in ICM (2010) and AJRCCM (2024: "Improving the Reporting of Trials Evaluating Organ Support Therapies Using Multistate Modeling"). R implementation: `mstate` package.
 
@@ -337,6 +584,43 @@ We will repeat primary analyses restricted to hospitals/time periods meeting pre
 
 ## 8. Sensitivity Analyses
 
+```mermaid
+flowchart TB
+    PRIMARY["Primary Analysis\n(full cohort, primary thresholds)"]
+
+    PRIMARY --> THR["Threshold Sensitivity"]
+    PRIMARY --> POP["Population Sensitivity"]
+    PRIMARY --> VFD_S["VFD Model Sensitivity"]
+    PRIMARY --> DATA_S["Data Completeness Sensitivity"]
+
+    THR --> SAT_THR["SAT duration:\n15 / 30* / 60 min"]
+    THR --> SBT_DUR["SBT duration:\n2* / 5 / 30 min"]
+    THR --> SBT_PS["SBT PS threshold:\n5 / 8* / 10 cmH2O"]
+    THR --> SBT_CPAP["SBT CPAP threshold:\n5 / 8* cmH2O"]
+
+    POP --> EX_D01["Exclude IMV\nday 0 and 1"]
+    POP --> EX_CA["Exclude cardiac\narrest admissions"]
+    POP --> EX_CC["Exclude comfort\ncare days"]
+    POP --> EX_TTM["Exclude TTM days"]
+    POP --> EX_1ST["First IMV\nepisode only"]
+
+    VFD_S --> MW["Mann-Whitney U"]
+    VFD_S --> PO["Proportional odds"]
+    VFD_S --> HURDLE["Two-part hurdle"]
+    VFD_S --> ZINB["ZINB"]
+
+    DATA_S --> HIGH_COMP["Restrict to >= 90%\nvent mode completeness"]
+    DATA_S --> HIGH_MAR["Restrict to >= 90%\nMAR completeness"]
+
+    style PRIMARY fill:#1565c0,color:#fff,stroke-width:3px
+    style SAT_THR fill:#fff3e0
+    style SBT_DUR fill:#fff3e0
+    style SBT_PS fill:#fff3e0
+    style SBT_CPAP fill:#fff3e0
+```
+
+> **Note:** Asterisks (*) denote primary thresholds. Each sensitivity re-runs the full outcome model suite on the restricted/modified cohort.
+
 ### 8.1 Alternative Phenotype Thresholds
 
 | Parameter | Primary | Sensitivity | Rationale |
@@ -385,16 +669,68 @@ This study is primarily descriptive and hypothesis-generating (phenotype develop
 
 ## 10. Software and Reproducibility
 
-- **Statistical software:** [To be specified — likely R or Python given CLIF consortium infrastructure]
+### 10.1 Federated Execution Architecture
+
+```mermaid
+flowchart LR
+    subgraph SITE_A["CLIF Site A"]
+        A_DATA[("Local CLIF\nTables")] --> A_00["00_cohort_id"]
+        A_00 --> A_01["01_SAT_standard"]
+        A_00 --> A_02["02_SBT_Standard"]
+        A_01 --> A_OUT["Site A\nOutputs"]
+        A_02 --> A_OUT
+    end
+
+    subgraph SITE_B["CLIF Site B"]
+        B_DATA[("Local CLIF\nTables")] --> B_00["00_cohort_id"]
+        B_00 --> B_01["01_SAT_standard"]
+        B_00 --> B_02["02_SBT_Standard"]
+        B_01 --> B_OUT["Site B\nOutputs"]
+        B_02 --> B_OUT
+    end
+
+    subgraph SITE_N["CLIF Site ...N"]
+        N_DATA[("Local CLIF\nTables")] --> N_00["00_cohort_id"]
+        N_00 --> N_01["01_SAT_standard"]
+        N_00 --> N_02["02_SBT_Standard"]
+        N_01 --> N_OUT["Site N\nOutputs"]
+        N_02 --> N_OUT
+    end
+
+    A_OUT -->|"Secure\ntransfer"| AGG
+    B_OUT -->|"Secure\ntransfer"| AGG
+    N_OUT -->|"Secure\ntransfer"| AGG
+
+    subgraph CENTRAL["Coordinating Center"]
+        AGG["07_aggregate_sites"] --> O3["03_outcome_models\nCox, Fine-Gray,\nNB, Logistic"]
+        AGG --> O4["04_hospital_variation\nRSR, MOR, ICC"]
+        AGG --> O6["06_sensitivity_analyses"]
+        O3 --> O5["05_manuscript_figures"]
+        O4 --> O5
+        O6 --> O5
+        O5 --> MS[("Manuscript\nTables & Figures")]
+    end
+
+    style SITE_A fill:#e3f2fd
+    style SITE_B fill:#e3f2fd
+    style SITE_N fill:#e3f2fd
+    style CENTRAL fill:#fce4ec
+    style MS fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+```
+
+### 10.2 Software Stack
+
+- **Primary language:** Python 3.9+
 - **Key packages:**
-  - Hierarchical models: `lme4` (R) or `statsmodels` (Python)
-  - Survival analysis: `survival` + `coxme` (R) for frailty models
-  - Bootstrap: custom implementation preserving cluster structure
-  - Competing risks: `cmprsk` (Fine-Gray), `mstate` (multistate model)
-  - Two-part models: `glmmTMB` (R) or custom implementation
-  - Visualization: `ggplot2` (R)
-- **Code repository:** All analysis code will be version-controlled and shared via the CLIF consortium repository
-- **Federated execution:** Phenotype algorithms will be executed locally at each site; only aggregate (de-identified) results will be pooled
+  - Hierarchical models: `statsmodels` (GEE, mixed-effects)
+  - Survival analysis: `lifelines` (Cox PH, time-varying)
+  - Competing risks: `rpy2` bridge to R `cmprsk::crr()` (Fine-Gray primary); discrete-time cloglog fallback
+  - Multistate models: custom discrete-time implementation
+  - Bootstrap: custom cluster-aware BCa implementation
+  - Visualization: `matplotlib`, `seaborn`
+- **R packages (via rpy2):** `cmprsk`, `survival`
+- **Code repository:** Version-controlled via CLIF consortium GitHub
+- **Federated execution:** Phenotype algorithms (scripts 00-02) executed locally at each site; only aggregate (de-identified) day-level results transferred to coordinating center
 
 ---
 
