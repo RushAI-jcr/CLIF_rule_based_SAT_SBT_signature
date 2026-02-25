@@ -723,7 +723,7 @@ def _(cohort_with_eligibility, confusion_matrix, final_df, np, os, output_dir, p
         _cm_pct = _cm / _total * 100
         _tick_labels = ['No Delivery', 'Delivery']
         _fig, _ax = plt.subplots(figsize=(3.5, 3.0))
-        _im = _ax.imshow(_cm, cmap=plt.cm.Blues)
+        _im = _ax.imshow(_cm, cmap='cividis')
         _ax.set_xticks([0, 1])
         _ax.set_yticks([0, 1])
         _ax.set_xticklabels(_tick_labels, fontsize=8)
@@ -731,6 +731,9 @@ def _(cohort_with_eligibility, confusion_matrix, final_df, np, os, output_dir, p
         _ax.set_xlabel(f'{_col} flag', fontsize=9)
         _ax.set_ylabel('Flowsheet delivery flag', fontsize=9)
         _ax.set_title(f'Concordance: flowsheet vs {_col}', fontsize=10, fontweight='bold')
+        _ax.spines['top'].set_visible(False)
+        _ax.spines['right'].set_visible(False)
+        _ax.tick_params(direction='out')
         for _i in range(_cm.shape[0]):
             for _j in range(_cm.shape[1]):
                 _ax.text(
@@ -878,8 +881,9 @@ def _(cohort_with_delivery, os, output_dir, pd, plt):
             f'Event time distribution — hospital {_hosp}',
             fontsize=10, fontweight='bold',
         )
-        _ax.tick_params(labelsize=8)
-        _ax.grid(axis='y', linestyle='--', alpha=0.7)
+        _ax.tick_params(labelsize=8, direction='out')
+        _ax.spines['top'].set_visible(False)
+        _ax.spines['right'].set_visible(False)
         # Legend placed outside plot area (below)
         _ax.legend(
             fontsize=8, loc='upper center',
@@ -920,9 +924,11 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
 
     # --- helper functions ---
     def _documented(series: pd.Series) -> str:
+        """Return 'Documented' if any value in series is non-null, else 'Not Documented'."""
         return 'Documented' if series.notna().any() else 'Not Documented'
 
     def _age_bucket(mean_age: float) -> str | None:
+        """Map a numeric mean age to a decade-range string bucket (e.g. '40-59')."""
         if pd.isna(mean_age):
             return None
         elif mean_age < 40:
@@ -934,6 +940,7 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
         return '80+'
 
     def _categorize_language(lang: str) -> str:
+        """Classify a free-text language string into 'English', 'Spanish', or 'Other'."""
         if re.search('english', str(lang), re.IGNORECASE):
             return 'English'
         elif re.search('spanish', str(lang), re.IGNORECASE):

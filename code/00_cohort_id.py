@@ -376,7 +376,8 @@ def _(hospitalization_to_block, np, pc, pd, required_id):
     # Map categorical values then resolve assessment_value (category-first for pass/fail)
     _pa_cohort["categorical_value"] = _pa_cohort["categorical_value"].str.lower().map(_CAT_MAP)
 
-    def _compute_value(row):
+    def _compute_value(row: pd.Series) -> object:
+        """Resolve assessment value, preferring categorical for pass/fail assessments."""
         if row["assessment_category"].endswith("_pass_fail"):
             return row["categorical_value"] if pd.notnull(row["categorical_value"]) else row["numerical_value"]
         return row["numerical_value"] if pd.notnull(row["numerical_value"]) else row["categorical_value"]
@@ -469,7 +470,8 @@ def _(mac, np, outlier_cfg, pd, tqdm, vit_weight):
         ("milliunits", "units"): 0.001, ("units", "milliunits"): 1000.0,
     }
 
-    def _convert_med_dose(row):
+    def _convert_med_dose(row: pd.Series) -> float:
+        """Convert medication dose to standardized units (weight/time normalized)."""
         cat = row["med_category"]
         if cat not in _MED_UNIT_INFO:
             return row

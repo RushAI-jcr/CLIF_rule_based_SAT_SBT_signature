@@ -334,7 +334,10 @@ def _(final_df_3, pd, plt):
     plt.xlabel('Hours since event (binned)')
     plt.ylabel('Number of Extubations')
     plt.xticks(rotation=45)
-    plt.grid(True)
+    _ax = plt.gca()
+    _ax.spines['top'].set_visible(False)
+    _ax.spines['right'].set_visible(False)
+    _ax.tick_params(direction='out')
     plt.tight_layout()
     plt.show()
     return
@@ -379,31 +382,31 @@ def _(final_df_3):
 
 
 @app.cell
-def _(final_df_3, np):
-    grouped_df = (
-        final_df_3
-        .groupby('hosp_id_day_key')
+def _(final_df_3, pl):
+    _pl_df = pl.from_pandas(final_df_3[
+        ['hosp_id_day_key', 'hospitalization_id', 'hospital_id', 'eligible_day',
+         'EHR_Delivery_2mins', 'EHR_Delivery_30mins', 'sbt_screen_pass_fail',
+         'sbt_delivery_pass_fail', 'flag_2_45_extubated', 'flip_skip_reason',
+         'extubated']
+    ])
+    _grouped_pl = (
+        _pl_df
+        .group_by('hosp_id_day_key')
         .agg(
-            hospitalization_id=('hospitalization_id', 'first'),
-            hospital_id=(
-                'hospital_id',
-                lambda x: x.dropna().iloc[-1] if x.dropna().size > 0 else np.nan,
-            ),
-            eligible_day=('eligible_day', 'max'),
-            EHR_Delivery_2mins=('EHR_Delivery_2mins', 'max'),
-            EHR_Delivery_30mins=('EHR_Delivery_30mins', 'max'),
-            sbt_screen_pass_fail=('sbt_screen_pass_fail', 'max'),
-            sbt_delivery_pass_fail=('sbt_delivery_pass_fail', 'max'),
-            flag_2_45_extubated=('flag_2_45_extubated', 'max'),
-            flip_skip_reason=(
-                'flip_skip_reason',
-                lambda x: x.dropna().iloc[-1] if x.dropna().size > 0 else np.nan,
-            ),
-            extubated=('extubated', 'max'),
+            pl.col('hospitalization_id').first(),
+            pl.col('hospital_id').drop_nulls().last(),
+            pl.col('eligible_day').max(),
+            pl.col('EHR_Delivery_2mins').max(),
+            pl.col('EHR_Delivery_30mins').max(),
+            pl.col('sbt_screen_pass_fail').max(),
+            pl.col('sbt_delivery_pass_fail').max(),
+            pl.col('flag_2_45_extubated').max(),
+            pl.col('flip_skip_reason').drop_nulls().last(),
+            pl.col('extubated').max(),
         )
-        .reset_index()
     )
-    mat_df = grouped_df[grouped_df['eligible_day'] == 1]
+    grouped_df = _grouped_pl.to_pandas()
+    mat_df = _grouped_pl.filter(pl.col('eligible_day') == 1).to_pandas()
     return grouped_df, mat_df
 
 
@@ -411,53 +414,47 @@ def _(final_df_3, np):
 # Cell 12 — Hospital-level summary
 # ---------------------------------------------------------------------------
 @app.cell
-def _(directory_path, grouped_df, pd):
-    _hospital_ids = grouped_df['hospital_id'].dropna().unique()
-    _summary_data = []
-    for _hosp in _hospital_ids:
-        _df_hosp = grouped_df[grouped_df['hospital_id'] == _hosp]
-        _df_eligible = _df_hosp[_df_hosp['eligible_day'] == 1]
-        _sbt_S = set(
-            _df_eligible[_df_eligible['sbt_screen_pass_fail'] == 1]['hosp_id_day_key'].unique()
-        )
-        _sbt_D = set(
-            _df_eligible[_df_eligible['sbt_delivery_pass_fail'] == 1]['hosp_id_day_key'].unique()
-        )
-        _ehr_2min = set(
-            _df_eligible[_df_eligible['EHR_Delivery_2mins'] == 1]['hosp_id_day_key'].unique()
-        )
-        _ehr_30min = set(
-            _df_eligible[_df_eligible['EHR_Delivery_30mins'] == 1]['hosp_id_day_key'].unique()
-        )
-        _ehr_extubated = set(
-            _df_eligible[_df_eligible['extubated'] == 1]['hosp_id_day_key'].unique()
-        )
-        _ehr_2min_45min_extubated = set(
-            _df_eligible[_df_eligible['flag_2_45_extubated'] == 1]['hosp_id_day_key'].unique()
-        )
-        _summary_data.append({
-            'hospital_id': _hosp,
-            'sbt_screen_pass': len(_sbt_S),
-            'sbt_delivery_pass': len(_sbt_D),
-            'ehr_2min': len(_ehr_2min),
-            'ehr_30min': len(_ehr_30min),
-            'extubated': len(_ehr_extubated),
-            'ehr_2min_45min_extubated': len(_ehr_2min_45min_extubated),
-            'df_eligible': len(_df_eligible),
-        })
-        print(f'\nHospital ID: {_hosp}')
-        print(f'  SBT Screen Pass              : {len(_sbt_S)}')
-        print(f'  SBT Delivery Pass            : {len(_sbt_D)}')
-        print(f'  EHR 2-min Delivery           : {len(_ehr_2min)}')
-        print(f'  EHR 30-min Delivery          : {len(_ehr_30min)}')
-        print(f'  Extubated                    : {len(_ehr_extubated)}')
-        print(f'  EHR 2min + 45min extubated   : {len(_ehr_2min_45min_extubated)}')
-        print(f'  Eligible days                : {len(_df_eligible)}')
+def _(directory_path, grouped_df, pl):
+    _gpl = pl.from_pandas(grouped_df)
+    _eligible_pl = _gpl.filter(pl.col('eligible_day') == 1)
 
-    _summary_df = pd.DataFrame(_summary_data)
-    _summary_df.to_csv(
+    def _count_flag(col: str) -> "pl.Expr":
+        """Count distinct hosp_id_day_key where col equals 1."""
+        return (
+            pl.col('hosp_id_day_key')
+            .filter(pl.col(col) == 1)
+            .n_unique()
+            .alias(col)
+        )
+
+    _summary_pl = _eligible_pl.group_by('hospital_id').agg(
+        _count_flag('sbt_screen_pass_fail'),
+        _count_flag('sbt_delivery_pass_fail'),
+        _count_flag('EHR_Delivery_2mins'),
+        _count_flag('EHR_Delivery_30mins'),
+        _count_flag('extubated'),
+        _count_flag('flag_2_45_extubated'),
+        pl.col('hosp_id_day_key').n_unique().alias('df_eligible'),
+    ).rename({
+        'sbt_screen_pass_fail': 'sbt_screen_pass',
+        'sbt_delivery_pass_fail': 'sbt_delivery_pass',
+        'EHR_Delivery_2mins': 'ehr_2min',
+        'EHR_Delivery_30mins': 'ehr_30min',
+        'flag_2_45_extubated': 'ehr_2min_45min_extubated',
+    })
+
+    for _row in _summary_pl.iter_rows(named=True):
+        print(f"\nHospital ID: {_row['hospital_id']}")
+        print(f"  SBT Screen Pass              : {_row['sbt_screen_pass']}")
+        print(f"  SBT Delivery Pass            : {_row['sbt_delivery_pass']}")
+        print(f"  EHR 2-min Delivery           : {_row['ehr_2min']}")
+        print(f"  EHR 30-min Delivery          : {_row['ehr_30min']}")
+        print(f"  Extubated                    : {_row['extubated']}")
+        print(f"  EHR 2min + 45min extubated   : {_row['ehr_2min_45min_extubated']}")
+        print(f"  Eligible days                : {_row['df_eligible']}")
+
+    _summary_pl.write_csv(
         f'{directory_path}/hospital_sbt_ehr_summary_within_eligible_day.csv',
-        index=False,
     )
     return
 
@@ -904,7 +901,7 @@ def _(directory_path, eligible_days, final_df_3, mat_df, pd):
 # Cell 15 — Time-of-day distribution plots
 # ---------------------------------------------------------------------------
 @app.cell
-def _(directory_path, final_df_3, pd, plt):
+def _(directory_path, final_df_3, pl, plt):
     _hospital_ids = final_df_3['hospital_id'].dropna().unique()
     _summary_list = []
     for _hosp in _hospital_ids:
@@ -931,27 +928,40 @@ def _(directory_path, final_df_3, pd, plt):
         plt.ylabel('Frequency')
         plt.title(f'Event Time Distribution (Hourly) - Hospital {_hosp}')
         plt.legend()
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        _ax = plt.gca()
+        _ax.spines['top'].set_visible(False)
+        _ax.spines['right'].set_visible(False)
+        _ax.tick_params(direction='out')
         plt.savefig(f'{directory_path}/event_time_distribution_hospital_{_hosp}.png')
         plt.close()
-        _hours_df = pd.DataFrame({'hour': range(24)})
-        _hours_df['SBT_Delivery'] = (
-            _hours_df['hour'].map(_sbt_hours.value_counts().sort_index()).fillna(0).astype(int)
+        _sbt_counts = _sbt_hours.value_counts().sort_index()
+        _ehr_counts = _ehr_hours.value_counts().sort_index()
+        _hours_pl = (
+            pl.DataFrame({'hour': list(range(24))})
+            .join(
+                pl.DataFrame({'hour': _sbt_counts.index.tolist(), 'SBT_Delivery': _sbt_counts.values.tolist()}),
+                on='hour', how='left',
+            )
+            .join(
+                pl.DataFrame({'hour': _ehr_counts.index.tolist(), 'EHR_Delivery': _ehr_counts.values.tolist()}),
+                on='hour', how='left',
+            )
+            .with_columns(
+                pl.col('SBT_Delivery').fill_null(0).cast(pl.Int64),
+                pl.col('EHR_Delivery').fill_null(0).cast(pl.Int64),
+                pl.lit(_hosp).alias('hospital_id'),
+            )
         )
-        _hours_df['EHR_Delivery'] = (
-            _hours_df['hour'].map(_ehr_hours.value_counts().sort_index()).fillna(0).astype(int)
-        )
-        _hours_df['hospital_id'] = _hosp
-        _summary_list.append(_hours_df)
-    pd.concat(_summary_list, ignore_index=True).to_csv(
-        f'{directory_path}/event_time_distribution_summary.csv', index=False
+        _summary_list.append(_hours_pl)
+    pl.concat(_summary_list).write_csv(
+        f'{directory_path}/event_time_distribution_summary.csv',
     )
     print('SBT vs EHR overlay plots created.')
     return
 
 
 @app.cell
-def _(directory_path, final_df_3, pd, plt):
+def _(directory_path, final_df_3, pl, plt):
     _hospital_ids = final_df_3['hospital_id'].dropna().unique()
     _summary_list = []
     for _hosp in _hospital_ids:
@@ -978,22 +988,35 @@ def _(directory_path, final_df_3, pd, plt):
         plt.ylabel('Frequency')
         plt.title(f'Event Time Distribution (Hourly) - Hospital {_hosp}')
         plt.legend()
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        _ax = plt.gca()
+        _ax.spines['top'].set_visible(False)
+        _ax.spines['right'].set_visible(False)
+        _ax.tick_params(direction='out')
         plt.savefig(
             f'{directory_path}/event_time_distribution_hospital_{_hosp}_by_ex.png'
         )
         plt.close()
-        _hours_df = pd.DataFrame({'hour': range(24)})
-        _hours_df['SBT_Delivery'] = (
-            _hours_df['hour'].map(_ext_hours.value_counts().sort_index()).fillna(0).astype(int)
+        _ext_counts = _ext_hours.value_counts().sort_index()
+        _ehr_counts = _ehr_hours.value_counts().sort_index()
+        _hours_pl = (
+            pl.DataFrame({'hour': list(range(24))})
+            .join(
+                pl.DataFrame({'hour': _ext_counts.index.tolist(), 'SBT_Delivery': _ext_counts.values.tolist()}),
+                on='hour', how='left',
+            )
+            .join(
+                pl.DataFrame({'hour': _ehr_counts.index.tolist(), 'EHR_Delivery': _ehr_counts.values.tolist()}),
+                on='hour', how='left',
+            )
+            .with_columns(
+                pl.col('SBT_Delivery').fill_null(0).cast(pl.Int64),
+                pl.col('EHR_Delivery').fill_null(0).cast(pl.Int64),
+                pl.lit(_hosp).alias('hospital_id'),
+            )
         )
-        _hours_df['EHR_Delivery'] = (
-            _hours_df['hour'].map(_ehr_hours.value_counts().sort_index()).fillna(0).astype(int)
-        )
-        _hours_df['hospital_id'] = _hosp
-        _summary_list.append(_hours_df)
-    pd.concat(_summary_list, ignore_index=True).to_csv(
-        f'{directory_path}/event_time_distribution_summary_by_ex.csv', index=False
+        _summary_list.append(_hours_pl)
+    pl.concat(_summary_list).write_csv(
+        f'{directory_path}/event_time_distribution_summary_by_ex.csv',
     )
     print('Extubated vs EHR overlay plots created.')
     return
@@ -1003,26 +1026,63 @@ def _(directory_path, final_df_3, pd, plt):
 # Cell 16 — Final summary stats
 # ---------------------------------------------------------------------------
 @app.cell
-def _(directory_path, final_df_3, mat_df, pd):
-    _total_days = final_df_3['hosp_id_day_key'].nunique()
-    _eligible_days_1 = final_df_3[final_df_3['eligible_day'] == 1]['hosp_id_day_key'].nunique()
-    _imv_days = final_df_3[final_df_3['vent_day_without_paralytics'] == 1]['hosp_id_day_key'].nunique()
-    _imv_days_no_filter = final_df_3[final_df_3['vent_day'] == 1]['hosp_id_day_key'].nunique()
+def _(directory_path, final_df_3, mat_df, pl):
+    _fpl = pl.from_pandas(final_df_3[
+        ['hosp_id_day_key', 'hospitalization_id', 'eligible_day',
+         'vent_day_without_paralytics', 'vent_day', 'device_category',
+         'location_category']
+    ])
+    _total_days = _fpl.select(pl.col('hosp_id_day_key').n_unique()).item()
+    _eligible_days_1 = (
+        _fpl.filter(pl.col('eligible_day') == 1)
+        .select(pl.col('hosp_id_day_key').n_unique()).item()
+    )
+    _imv_days = (
+        _fpl.filter(pl.col('vent_day_without_paralytics') == 1)
+        .select(pl.col('hosp_id_day_key').n_unique()).item()
+    )
+    _imv_days_no_filter = (
+        _fpl.filter(pl.col('vent_day') == 1)
+        .select(pl.col('hosp_id_day_key').n_unique()).item()
+    )
     _pct = _eligible_days_1 / _imv_days * 100 if _imv_days > 0 else 0
-    _imv_icu_days = final_df_3[
-        (final_df_3['device_category'] == 'imv')
-        & (final_df_3['location_category'] == 'icu')
-    ]['hosp_id_day_key'].nunique()
-    _h_total = final_df_3['hospitalization_id'].nunique()
-    _h_eligible = final_df_3[final_df_3['eligible_day'] == 1]['hospitalization_id'].nunique()
+    _imv_icu_days = (
+        _fpl.filter(
+            (pl.col('device_category') == 'imv')
+            & (pl.col('location_category') == 'icu')
+        ).select(pl.col('hosp_id_day_key').n_unique()).item()
+    )
+    _h_total = _fpl.select(pl.col('hospitalization_id').n_unique()).item()
+    _h_eligible = (
+        _fpl.filter(pl.col('eligible_day') == 1)
+        .select(pl.col('hospitalization_id').n_unique()).item()
+    )
     _h_pct = _h_eligible / _h_total * 100 if _h_total > 0 else 0
-    _h_imv = final_df_3[final_df_3['device_category'] == 'imv']['hospitalization_id'].nunique()
-    _h_imv_icu = final_df_3[
-        (final_df_3['device_category'] == 'imv')
-        & (final_df_3['location_category'] == 'icu')
-    ]['hospitalization_id'].nunique()
-    _ehr_dist = mat_df[mat_df['extubated'] == 1]['EHR_Delivery_2mins'].value_counts(normalize=True) * 100
-    _sbt_dist = mat_df[mat_df['extubated'] == 1]['sbt_delivery_pass_fail'].value_counts(normalize=True) * 100
+    _h_imv = (
+        _fpl.filter(pl.col('device_category') == 'imv')
+        .select(pl.col('hospitalization_id').n_unique()).item()
+    )
+    _h_imv_icu = (
+        _fpl.filter(
+            (pl.col('device_category') == 'imv')
+            & (pl.col('location_category') == 'icu')
+        ).select(pl.col('hospitalization_id').n_unique()).item()
+    )
+
+    # Distribution stats from mat_df (already small)
+    _mpl = pl.from_pandas(mat_df[
+        ['extubated', 'EHR_Delivery_2mins', 'sbt_delivery_pass_fail']
+    ])
+    _ext = _mpl.filter(pl.col('extubated') == 1)
+    _n_ext = _ext.height
+    _ehr_vc = (
+        _ext.group_by('EHR_Delivery_2mins').len()
+        .with_columns((pl.col('len') / _n_ext * 100).alias('pct'))
+    )
+    _sbt_vc = (
+        _ext.group_by('sbt_delivery_pass_fail').len()
+        .with_columns((pl.col('len') / _n_ext * 100).alias('pct'))
+    )
 
     print('By n = Days')
     print('Total days:', _total_days)
@@ -1035,11 +1095,12 @@ def _(directory_path, final_df_3, mat_df, pd):
     print('IMV encounters:', _h_imv)
     print('IMV + ICU encounters:', _h_imv_icu)
     print('\nEHR_Delivery_2mins distribution (extubated == 1):')
-    print(_ehr_dist)
+    print(_ehr_vc)
     print('\nsbt_delivery_pass_fail distribution (extubated == 1):')
-    print(_sbt_dist)
+    print(_sbt_vc)
 
-    _stats_df = pd.DataFrame({
+    # Build stats output with polars
+    _stats_pl = pl.DataFrame({
         'Metric': [
             'total_days', 'eligible_days', 'eligible_percentage',
             'imv_days_without_paralytics', 'imv_icu_days', 'imv_days_no_filter',
@@ -1047,19 +1108,27 @@ def _(directory_path, final_df_3, mat_df, pd):
             'enc_imv_days', 'enc_imv_icu_days',
         ],
         'Value': [
-            _total_days, _eligible_days_1, _pct,
-            _imv_days, _imv_icu_days, _imv_days_no_filter,
-            _h_total, _h_eligible, _h_pct, _h_imv, _h_imv_icu,
+            float(_total_days), float(_eligible_days_1), _pct,
+            float(_imv_days), float(_imv_icu_days), float(_imv_days_no_filter),
+            float(_h_total), float(_h_eligible), _h_pct,
+            float(_h_imv), float(_h_imv_icu),
         ],
     })
-    _ehr_df = _ehr_dist.reset_index()
-    _ehr_df.columns = ['Metric', 'Value']
-    _ehr_df['Metric'] = 'EHR_Delivery_2mins_' + _ehr_df['Metric'].astype(str) + '_extubated=1'
-    _sbt_df = _sbt_dist.reset_index()
-    _sbt_df.columns = ['Metric', 'Value']
-    _sbt_df['Metric'] = 'sbt_delivery_pass_fail_' + _sbt_df['Metric'].astype(str) + '_extubated=1'
-    _stats_df = pd.concat([_stats_df, _ehr_df, _sbt_df], ignore_index=True)
-    _stats_df.to_csv(f'{directory_path}/stats_df.csv', index=False)
+    _ehr_stats = _ehr_vc.select(
+        (pl.lit('EHR_Delivery_2mins_')
+         + pl.col('EHR_Delivery_2mins').cast(pl.Utf8)
+         + pl.lit('_extubated=1')).alias('Metric'),
+        pl.col('pct').alias('Value'),
+    )
+    _sbt_stats = _sbt_vc.select(
+        (pl.lit('sbt_delivery_pass_fail_')
+         + pl.col('sbt_delivery_pass_fail').cast(pl.Utf8)
+         + pl.lit('_extubated=1')).alias('Metric'),
+        pl.col('pct').alias('Value'),
+    )
+    pl.concat([_stats_pl, _ehr_stats, _sbt_stats]).write_csv(
+        f'{directory_path}/stats_df.csv',
+    )
     print('\nFinal stats saved.')
     return
 
@@ -1069,11 +1138,11 @@ def _(directory_path, final_df_3, mat_df, pd):
 # ---------------------------------------------------------------------------
 @app.cell
 def _(np, pd, re, t1_cohort):
-    def documented(series):
+    def documented(series: "pd.Series") -> str:
         """Return 'Documented' if any non-null value exists, else 'Not Documented'."""
         return 'Documented' if series.notna().any() else 'Not Documented'
 
-    def age_bucket(mean_age):
+    def age_bucket(mean_age: float) -> str | None:
         """Bin a numeric age into decade-span categories."""
         if pd.isna(mean_age):
             return None
@@ -1247,11 +1316,15 @@ def _():
 
 
 @app.cell
-def _(pd):
-    mapping_ids = pd.read_csv('../output/intermediate/hospitalization_to_block_df.csv')
-    mapping_ids[['hospitalization_id', 'encounter_block']] = (
-        mapping_ids[['hospitalization_id', 'encounter_block']].astype(str)
+def _(pl):
+    _mapping_pl = pl.read_csv(
+        '../output/intermediate/hospitalization_to_block_df.csv',
+    ).with_columns(
+        pl.col('hospitalization_id').cast(pl.Utf8),
+        pl.col('encounter_block').cast(pl.Utf8),
     )
+    # Convert to pandas for downstream sofa/pySBT compatibility
+    mapping_ids = _mapping_pl.to_pandas()
     mapping_ids.head()
     return (mapping_ids,)
 
