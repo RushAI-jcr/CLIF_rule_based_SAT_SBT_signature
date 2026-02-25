@@ -330,9 +330,14 @@ def figure3_criterion_validity(data_dir, output_path):
             spec = row.get("Specificity", np.nan)
             spec_lo = row.get("Specificity_CI_low", np.nan)
             spec_hi = row.get("Specificity_CI_high", np.nan)
+            def _fmt_ci(val: float, lo: float, hi: float) -> str:
+                if pd.notna(lo) and pd.notna(hi):
+                    return f"{val:.2f} ({lo:.2f}-{hi:.2f})"
+                return f"{val:.2f}"
+
             metrics_text = (
-                f"Sens: {sens:.2f} ({sens_lo:.2f}-{sens_hi:.2f})\n"
-                f"Spec: {spec:.2f} ({spec_lo:.2f}-{spec_hi:.2f})\n"
+                f"Sens: {_fmt_ci(sens, sens_lo, sens_hi)}\n"
+                f"Spec: {_fmt_ci(spec, spec_lo, spec_hi)}\n"
                 f"Acc: {row.get('Accuracy', np.nan):.2f}  F1: {row.get('F1', np.nan):.2f}"
             )
             ax.text(0.5, -0.23, metrics_text, transform=ax.transAxes, ha="center", fontsize=8, family="monospace")
@@ -598,13 +603,18 @@ def figure4_timing_pairing(data_dir, output_path):
                     sat_df.loc[sat_df[dcol] == 1, "hosp_id_day_key"].unique()
                 )
 
-        # Collect SBT delivery day-keys
-        sbt_days: set = set()
+        # Collect SBT delivery day-keys using the primary definition only
+        # (EHR_Delivery_2mins, falling back to 5mins then 30mins), consistent
+        # with the Panel D histogram logic. A union across definitions would
+        # inflate counts by treating the same SBT event multiple times.
+        sbt_dcol = None
         for dcol in ["EHR_Delivery_2mins", "EHR_Delivery_5mins", "EHR_Delivery_30mins"]:
             if dcol in sbt_df.columns and "hosp_id_day_key" in sbt_df.columns:
-                sbt_days.update(
-                    sbt_df.loc[sbt_df[dcol] == 1, "hosp_id_day_key"].unique()
-                )
+                sbt_dcol = dcol
+                break
+        sbt_days: set = set()
+        if sbt_dcol:
+            sbt_days = set(sbt_df[sbt_df[sbt_dcol] == 1]["hosp_id_day_key"].unique())
 
         paired   = sat_days & sbt_days
         sat_only = sat_days - sbt_days

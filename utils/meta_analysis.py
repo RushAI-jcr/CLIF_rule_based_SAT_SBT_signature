@@ -166,6 +166,11 @@ def cluster_bootstrap_concordance(
             select_cols.append(col)
     df = day_level_df[select_cols].copy()
     df = df.dropna(subset=[ehr_col, flowsheet_col])
+    if df.empty:
+        raise ValueError(
+            "cluster_bootstrap_concordance: no rows remain after dropping NaN "
+            "in ehr/flowsheet columns."
+        )
     df[ehr_col] = df[ehr_col].astype(int)
     df[flowsheet_col] = df[flowsheet_col].astype(int)
 
@@ -222,16 +227,19 @@ def cluster_bootstrap_concordance(
     if effective_cluster is not None:
         clusters = df[effective_cluster].unique()
         n_clusters = len(clusters)
+        # Pre-group into dict to avoid O(n_clusters × n_rows) filtering per iteration
+        cluster_groups = {
+            cid: grp for cid, grp in df.groupby(effective_cluster)
+        }
 
         for _ in range(n_boot):
             sampled = rng.choice(clusters, size=n_clusters, replace=True)
-            # Reconstruct bootstrap sample from cluster draws
-            frames = [df[df[effective_cluster] == cid] for cid in sampled]
-            boot_df = pd.concat(frames, ignore_index=True)
-            boot_records.append(
-                _metrics_from_arrays(boot_df[ehr_col].values,
-                                     boot_df[flowsheet_col].values)
-            )
+            # Use np.concatenate on raw arrays for speed instead of pd.concat
+            ehr_arrays = [cluster_groups[cid][ehr_col].values for cid in sampled]
+            flow_arrays = [cluster_groups[cid][flowsheet_col].values for cid in sampled]
+            boot_ehr = np.concatenate(ehr_arrays)
+            boot_flow = np.concatenate(flow_arrays)
+            boot_records.append(_metrics_from_arrays(boot_ehr, boot_flow))
     else:
         # Row-level bootstrap fallback
         n_clusters = len(df)

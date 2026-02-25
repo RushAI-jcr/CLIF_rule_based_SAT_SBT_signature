@@ -439,9 +439,10 @@ def _fit_cause_specific_cox(
     # Note: clustering at hospitalization level is trivial (one subject per cluster);
     # hospital-level clustering accounts for within-hospital correlation.
     ctv = CoxTimeVaryingFitter(penalizer=0.1)
+    cluster_kwarg = {"cluster_col": "hospital_id"} if "hospital_id" in fit_df.columns else {}
     ctv.fit(fit_df, id_col="hospitalization_id",
             start_col="start", stop_col="stop", event_col="event",
-            robust=True, cluster_col="hospital_id")
+            robust=True, **cluster_kwarg)
     # Note: lifelines does not support true random effects. Hospital dummies
     # with L2 penalty approximate a fixed-effects frailty model [SAP 2.2 limitation].
 
@@ -547,6 +548,7 @@ def _prepare_baseline_covariates(
     forward; anything beyond that window is left as NaN and then filled
     with the cohort median as a last resort.
     """
+    hosp_df = hosp_df.copy()
     covariates = [exposure_col, "age_at_admission", "sex_male", "race_white"]
     # Time-windowed LOCF rules matching enforce_missing_data_windows [SAP 2.9]
     locf_windows = {
@@ -1068,9 +1070,8 @@ def fit_awakening_model(day_level_df: pd.DataFrame) -> dict[str, Any]:
         rass_peak_col = "rass_max"
         awake_df["rass_peak"] = awake_df["rass_max"]
     else:
-        # Fallback: use same aggregated rass column (median-based)
-        rass_peak_col = "rass"
-        awake_df["rass_peak"] = awake_df["rass"]
+        print("fit_awakening_model: rass_max unavailable; cannot reliably define awakening. Skipping.")
+        return _placeholder_result("GEE Logistic - SAT Awakening", model_family="gee_logistic")
 
     awake_df["awakened"] = (awake_df["rass_peak"] >= -1).astype(int)
 
@@ -1088,7 +1089,7 @@ def fit_awakening_model(day_level_df: pd.DataFrame) -> dict[str, Any]:
             awake_df[c] = awake_df[c].fillna(awake_df[c].median())
             covariates.append(c)
 
-    required_cols = covariates + ["awakened", "hospital_id"]
+    required_cols = covariates + ["awakened", "hospital_id", "hospitalization_id"]
     model_df = awake_df[required_cols].dropna()
 
     if len(model_df) < 20 or model_df["awakened"].nunique() < 2:
@@ -1112,7 +1113,7 @@ def fit_awakening_model(day_level_df: pd.DataFrame) -> dict[str, Any]:
 
     try:
         cov_struct = Exchangeable()
-        gee = GEE(y, X, groups=model_df["hospital_id"],
+        gee = GEE(y, X, groups=model_df["hospitalization_id"],
                   family=Binomial(), cov_struct=cov_struct)
         gee_result = gee.fit(cov_type="robust")
 

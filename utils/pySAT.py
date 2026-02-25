@@ -33,7 +33,9 @@ def _all_zero_or_nan(df: pd.DataFrame, cols: list[str]) -> pd.Series:
     """Return True for each row where all specified columns are 0 or NaN."""
     present = [c for c in cols if c in df.columns]
     if not present:
-        return pd.Series(True, index=df.index)
+        raise KeyError(
+            f"_all_zero_or_nan: none of the expected columns {cols} found in DataFrame"
+        )
     return df[present].apply(
         lambda row: all(pd.isna(v) or v == 0 for v in row), axis=1
     )
@@ -140,7 +142,8 @@ def detect_sat_delivery(
             window = day_group[
                 (day_group["event_time"] >= t0) & (day_group["event_time"] < t_end)
             ]
-            if window.empty:
+            # Require at least 50% observation coverage of the requested duration
+            if window.empty or window["event_time"].max() < t0 + delta * 0.5:
                 continue
 
             # Verify all rows in window: IMV + ICU
@@ -163,7 +166,8 @@ def detect_sat_delivery(
             window = day_group[
                 (day_group["event_time"] >= t0) & (day_group["event_time"] < t_end)
             ]
-            if window.empty:
+            # Require at least 50% observation coverage of the requested duration
+            if window.empty or window["event_time"].max() < t0 + delta * 0.5:
                 continue
 
             # Verify all rows in window: IMV + ICU
@@ -181,4 +185,3 @@ def detect_sat_delivery(
     return df
 
 
-print("Imported SAT Helper!")

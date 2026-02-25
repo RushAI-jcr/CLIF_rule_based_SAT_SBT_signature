@@ -94,11 +94,15 @@ def compute_consort_numbers(data_dir: str) -> dict[str, int]:
     sat_path = os.path.join(data_dir, "intermediate", "final_df_SAT.csv")
     if os.path.exists(sat_path):
         sat = pd.read_csv(sat_path, low_memory=False)
-        consort["n_sat_eligible_days"] = int(
-            sat[sat.get("eligible_event", sat.get("on_vent_and_sedation", pd.Series())) == 1]["hosp_id_day_key"].nunique()
-        ) if "eligible_event" in sat.columns else int(
-            sat[sat.get("on_vent_and_sedation", pd.Series()) == 1]["hosp_id_day_key"].nunique()
-        ) if "on_vent_and_sedation" in sat.columns else 0
+        elig_col = next(
+            (c for c in ["eligible_event", "on_vent_and_sedation"] if c in sat.columns), None
+        )
+        if elig_col:
+            consort["n_sat_eligible_days"] = int(
+                sat[sat[elig_col] == 1]["hosp_id_day_key"].nunique()
+            )
+        else:
+            consort["n_sat_eligible_days"] = 0
         consort["n_sat_patients"] = int(sat["patient_id"].nunique())
 
         # Flowsheet availability
@@ -150,7 +154,7 @@ def compute_pooled_delivery_rates(data_dir: str) -> pd.DataFrame:
         if elig_col not in df.columns:
             elig_col = "on_vent_and_sedation" if "on_vent_and_sedation" in df.columns else "eligible_event"
 
-        eligible = df[df.get(elig_col, pd.Series(dtype=float)) == 1] if elig_col in df.columns else df
+        eligible = df[df[elig_col] == 1] if elig_col in df.columns else df
 
         for dcol in delivery_cols:
             if dcol not in df.columns:
@@ -460,7 +464,12 @@ def compute_pooled_concordance(
         # Random-effects meta-analysis for sensitivity/specificity across files.
         if {"TP", "FN", "TN", "FP"}.issubset(grp.columns):
             meta_df = grp.copy()
-            meta_df["site_label"] = meta_df.get("hospital_id", meta_df.get("source_file", "site")).astype(str)
+            if "hospital_id" in meta_df.columns:
+                meta_df["site_label"] = meta_df["hospital_id"].astype(str)
+            elif "source_file" in meta_df.columns:
+                meta_df["site_label"] = meta_df["source_file"].astype(str)
+            else:
+                meta_df["site_label"] = "site"
             # Sensitivity
             sens_denom = (meta_df["TP"] + meta_df["FN"]).replace(0, np.nan)
             meta_df["sens_est"] = meta_df["TP"] / sens_denom

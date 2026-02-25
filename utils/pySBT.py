@@ -240,7 +240,13 @@ def process_diagnostic_flip_sbt_optimized_v2(
         ``cohort`` with SBT delivery columns and diagnostic columns added in place.
     """
     if durations_min is None:
-        durations_min = [SBT_PRIMARY_DURATION_MIN, SBT_MODIFIED_DURATION_MIN, 30]
+        # If the caller passed a non-default duration_min but did not explicitly
+        # provide durations_min, honour duration_min as the primary entry so it
+        # is not silently ignored.
+        if duration_min != SBT_PRIMARY_DURATION_MIN:
+            durations_min = [duration_min, SBT_MODIFIED_DURATION_MIN, 30]
+        else:
+            durations_min = [SBT_PRIMARY_DURATION_MIN, SBT_MODIFIED_DURATION_MIN, 30]
 
     # The primary duration for flip/skip diagnostics is the first entry
     primary_duration = durations_min[0]

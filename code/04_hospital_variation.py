@@ -225,18 +225,13 @@ def compute_risk_adjusted_rates(
             if np.isfinite(hospital_var)
             else np.nan
         )
-        # ICC = sigma_h^2 / (sigma_h^2 + sigma_p^2 + pi^2/3) [SAP 2.7]
-        patient_var = np.nan
-        if hasattr(result.model, "vcp_names"):
-            for idx2, name2 in enumerate(result.model.vcp_names):
-                if "patient_re" in str(name2):
-                    sigma_p = float(np.exp(result.vcp_mean[idx2]))
-                    patient_var = sigma_p ** 2
-                    break
-        if np.isnan(patient_var):
-            patient_var = 0.0
+        # Two-level ICC(3,1): hospital variance / (hospital variance + pi^2/3)
+        # The level-1 residual variance for a logistic model is pi^2/3.
+        # Patient-level random effects are NOT included in the denominator
+        # because ICC(3,1) quantifies the proportion of total logistic variance
+        # attributable to hospitals alone. [SAP 2.7]
         icc = (
-            hospital_var / (hospital_var + patient_var + (np.pi ** 2 / 3))
+            hospital_var / (hospital_var + (np.pi ** 2 / 3))
             if np.isfinite(hospital_var)
             else np.nan
         )
@@ -293,7 +288,9 @@ def compute_adjusted_median_odds_ratio(
     boot_amors = []
     for _ in range(1000):
         # Parametric bootstrap around sigma_u^2 estimate.
-        boot_sigma = abs(rng.normal(loc=np.sqrt(max(sigma_u_sq, 0)), scale=0.1))
+        # Scale noise proportionally to the estimated SD (30% CV) rather than
+        # a fixed value, so the bootstrap CI width is data-driven.
+        boot_sigma = abs(rng.normal(loc=np.sqrt(max(sigma_u_sq, 0)), scale=max(np.sqrt(max(sigma_u_sq, 0)) * 0.3, 0.01)))
         boot_var = boot_sigma**2
         boot_amors.append(float(np.exp(np.sqrt(2 * boot_var) * norm.ppf(0.75))))
 

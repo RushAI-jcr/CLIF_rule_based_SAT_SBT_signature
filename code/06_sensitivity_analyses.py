@@ -292,11 +292,19 @@ def sensitivity_sat_durations(sat_file: str, output_dir: str) -> None:
         print(f"  Running SAT detection: duration={duration} min ...")
         result_df = detect_sat_delivery(sat_df.copy(), duration_min=duration)
 
-        n_vent_days = result_df["hosp_id_day_key"].nunique() if "hosp_id_day_key" in result_df.columns else len(result_df)
+        if "hosp_id_day_key" in result_df.columns:
+            ehr_day_agg = result_df.groupby("hosp_id_day_key")["SAT_EHR_delivery"].max()
+            n_vent_days = len(ehr_day_agg)
+            ehr_delivered = int(ehr_day_agg.sum())
+        else:
+            n_vent_days = len(result_df)
+            ehr_delivered = int(result_df["SAT_EHR_delivery"].sum())
 
-        # Delivery is 1 per eligible vent-day (first qualifying candidate)
-        ehr_delivered = int(result_df["SAT_EHR_delivery"].sum())
-        mod_delivered = int(result_df["SAT_modified_delivery"].sum())
+        if "hosp_id_day_key" in result_df.columns and "SAT_modified_delivery" in result_df.columns:
+            mod_day_agg = result_df.groupby("hosp_id_day_key")["SAT_modified_delivery"].max()
+            mod_delivered = int(mod_day_agg.sum())
+        else:
+            mod_delivered = int(result_df["SAT_modified_delivery"].sum()) if "SAT_modified_delivery" in result_df.columns else 0
 
         ehr_rate = ehr_delivered / n_vent_days if n_vent_days > 0 else np.nan
         mod_rate = mod_delivered / n_vent_days if n_vent_days > 0 else np.nan
@@ -366,14 +374,17 @@ def sensitivity_sbt_parameters(sbt_file: str, output_dir: str) -> None:
                 durations_min=durations_list,
             )
 
-            n_vent_days = (
-                result_df["hosp_id_day_key"].nunique()
-                if "hosp_id_day_key" in result_df.columns
-                else len(result_df)
-            )
-
             primary_col = f"EHR_Delivery_{duration}mins"
-            delivered = int(result_df[primary_col].sum()) if primary_col in result_df.columns else 0
+            if "hosp_id_day_key" in result_df.columns and primary_col in result_df.columns:
+                sbt_day_agg = result_df.groupby("hosp_id_day_key")[primary_col].max()
+                n_vent_days = len(sbt_day_agg)
+                delivered = int(sbt_day_agg.sum())
+            elif "hosp_id_day_key" in result_df.columns:
+                n_vent_days = result_df["hosp_id_day_key"].nunique()
+                delivered = 0
+            else:
+                n_vent_days = len(result_df)
+                delivered = int(result_df[primary_col].sum()) if primary_col in result_df.columns else 0
             rate = delivered / n_vent_days if n_vent_days > 0 else np.nan
 
             results.append({
