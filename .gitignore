@@ -33,7 +33,9 @@ clif_*.fst
 output/intermediate/*.csv
 output/intermediate/*.parquet
 output/intermediate/*.RData
+output/intermediate/*.json
 output/final/**/*.csv
+output/final/**/*.parquet
 output/final/**/*.pdf
 output/final/**/*.png
 output/final/**/*.json
@@ -41,6 +43,9 @@ output/final/**/*.json
 !output/README.md
 !output/final/README.md
 !output/intermediate/README.md
+
+# --- Local synthetic fixtures (code-only repository policy) ---
+test_data/
 
 # --- Figures and reports ---
 *.pdf
@@ -60,3 +65,4 @@ Thumbs.db
 temp.ipynb
 code/backupcode/
 *.log
+.pytest_cache/

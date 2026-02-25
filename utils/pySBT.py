@@ -9,12 +9,15 @@ import seaborn as sns
 import os
 from definitions_source_of_truth import (
     SBT_MIN_CONTROLLED_MODE_HOURS,
+    SBT_MIN_STABILITY_HOURS,
     SBT_PRIMARY_DURATION_MIN,
     SBT_MODIFIED_DURATION_MIN,
     SBT_PS_MAX,
     SBT_CPAP_MAX,
     VENT_DAY_ANCHOR_HOUR,
     SBT_CONTROLLED_MODES,
+    SBT_ELIGIBILITY_WINDOW_START_HOUR,
+    SBT_ELIGIBILITY_WINDOW_END_HOUR,
 )
 from sklearn.metrics import (
     accuracy_score,
@@ -29,6 +32,43 @@ from typing import Optional
 
 warnings.filterwarnings("ignore")
 from tableone import TableOne
+
+
+def _has_consecutive_stability(
+    obs_df: pd.DataFrame,
+    stability_col: str,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    min_hours: int = SBT_MIN_STABILITY_HOURS,
+) -> bool:
+    """Check if stability_col == 1 for at least `min_hours` consecutive hours
+    within [window_start, window_end].
+
+    Per METHODS_DECISIONS_LOCKED.md Section 1: hemodynamic and respiratory
+    stability must be sustained for at least 2 consecutive hours within the
+    10 PM to 6 AM eligibility window.
+    """
+    window = obs_df[
+        (obs_df["event_time"] >= window_start)
+        & (obs_df["event_time"] <= window_end)
+    ].sort_values("event_time")
+
+    if window.empty or stability_col not in window.columns:
+        return False
+
+    threshold = pd.Timedelta(hours=min_hours)
+    # Find contiguous segments where stability is met
+    window = window.copy()
+    window["_stable"] = (window[stability_col] == 1)
+    window["_seg"] = (window["_stable"] != window["_stable"].shift()).cumsum()
+    for _, seg in window[window["_stable"]].groupby("_seg"):
+        if len(seg) < 2:
+            continue
+        seg_duration = seg["event_time"].iloc[-1] - seg["event_time"].iloc[0]
+        if seg_duration >= threshold:
+            return True
+    return False
+
 
 def process_cohort_conditions(cohort, How ):
     # --- Preliminary processing ---
@@ -138,10 +178,29 @@ def process_cohort_conditions(cohort, How ):
                 break  # Only the first qualifying segment for this day is flagged.
         
         # --- Eligible Day Flag ---
-        # If condition 1 is met for the day, mark all rows of this day as eligible_day = 1.
+        # If condition 1 is met for the day, verify 2h consecutive stability
+        # within the 10 PM – 6 AM eligibility window before marking eligible.
         if cond1_met:
-            cohort.loc[day_group.index, 'eligible_day'] = 1
-    
+            # Compute eligibility window for stability check
+            index_day = curr_day + pd.Timedelta(hours=VENT_DAY_ANCHOR_HOUR)
+            elig_start = index_day - pd.Timedelta(hours=24 - SBT_ELIGIBILITY_WINDOW_START_HOUR)
+            elig_end = index_day.normalize() + pd.Timedelta(hours=SBT_ELIGIBILITY_WINDOW_END_HOUR)
+
+            stability_ok = True
+            if How in ('Hemodynamic_Stability', 'Both_stabilities'):
+                if not _has_consecutive_stability(
+                    hosp_df, 'Hemodynamic_Stability_by_NEE', elig_start, elig_end
+                ):
+                    stability_ok = False
+            if How in ('Respiratory_Stability', 'Both_stabilities'):
+                if not _has_consecutive_stability(
+                    hosp_df, 'Respiratory_Stability', elig_start, elig_end
+                ):
+                    stability_ok = False
+
+            if stability_ok:
+                cohort.loc[day_group.index, 'eligible_day'] = 1
+
     return cohort
 
 

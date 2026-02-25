@@ -1,0 +1,72 @@
+sap_version: "Statistical_Analysis_Plan_SAT_SBT.docx"
+sap_date: "2026-02-24"
+policy:
+  source_of_truth: docx
+  method_parity_rule: python_method_equivalent_allowed
+requirements:
+  - id: SAP-4.3-CI-BCA
+    section: "4"
+    title: "Criterion CIs use BCa bootstrap"
+  - id: SAP-4.3-CI-CLUSTER
+    section: "4"
+    title: "Criterion CIs clustered at IMV episode (fallback hospitalization)"
+  - id: SAP-4.4-CI-META
+    section: "4"
+    title: "Site-stratified random-effects pooling for sensitivity/specificity with Q and I2"
+  - id: SAP-5.2-COX-EXTUBATION
+    section: "5"
+    title: "Cause-specific time-varying Cox extubation model"
+  - id: SAP-5.3-VFD-FG
+    section: "5"
+    title: "Fine-Gray-equivalent VFD primary model"
+  - id: SAP-5.3-VFD-COMPONENTS
+    section: "5"
+    title: "VFD component outputs + CIF"
+  - id: SAP-5.4-VFD-MULTISTATE
+    section: "5"
+    title: "Multistate VFD secondary outputs"
+  - id: SAP-5.5-ICU-LOS-MIXED
+    section: "5"
+    title: "ICU LOS mixed-effects random-intercept model"
+  - id: SAP-5.6-MORTALITY-MIXED
+    section: "5"
+    title: "Mortality mixed-effects random-intercept model"
+  - id: SAP-5.8-JOINT-4LEVEL
+    section: "5"
+    title: "Joint SAT+SBT 4-level exposure model"
+  - id: SAP-6.1-RSR-PEO
+    section: "6"
+    title: "Hospital RSR = Predicted/Expected * Overall"
+  - id: SAP-6.2-MOR-VAR
+    section: "6"
+    title: "MOR from model-estimated hospital random-effect variance"
+  - id: SAP-6.3-FUNNEL-95-998
+    section: "6"
+    title: "Funnel outputs with 95% and 99.8% control limits"
+  - id: SAP-6.4-AGREEMENT-CCC
+    section: "6"
+    title: "Agreement uses Pearson, Spearman, Bland-Altman, CCC"
+  - id: SAP-7.1-MISSING-LOCF-WINDOW
+    section: "7"
+    title: "Missing-data windows: FiO2/PEEP <=6h; SpO2/hemodynamics <=2h"
+  - id: SAP-7.2-ELIGIBILITY-MISSING-EXCLUSION
+    section: "7"
+    title: "Eligibility exclusions for missing required sources"
+  - id: SAP-8.1-POP-RESTRICTIONS
+    section: "8"
+    title: "Sensitivity population restrictions implemented"
+  - id: SAP-8.2-COMPLETENESS-RERUNS
+    section: "8"
+    title: "Completeness-threshold reruns (>=90% vent settings, >=90% MAR)"
+  - id: SAP-9.1-MULTIPLICITY-NONE
+    section: "9"
+    title: "No default multiplicity correction in primary outputs"
+  - id: SAP-9.2-ANALYSIS-ROLE-TAGS
+    section: "9"
+    title: "analysis_role and prespec_status tags on model outputs"
+  - id: SAP-10.1-TRACEABILITY-REGISTRY
+    section: "10"
+    title: "Machine-readable SAP requirement registry"
+  - id: SAP-10.2-TRACEABILITY-GATE
+    section: "10"
+    title: "Executable SAP conformance gate"

@@ -281,6 +281,69 @@ def figure3_criterion_validity(data_dir, output_path):
     Reads per-site concordance CSVs from output/final/{SITE}/SAT_standard/
     and SBT equivalents.
     """
+    pooled_path = os.path.join(data_dir, "..", "final", "pooled", "pooled_concordance.csv")
+    pooled_df = pd.read_csv(pooled_path) if os.path.exists(pooled_path) else pd.DataFrame()
+
+    if not pooled_df.empty:
+        n_cols = min(3, len(pooled_df))
+        fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5))
+        if n_cols == 1:
+            axes = [axes]
+
+        for i in range(n_cols):
+            ax = axes[i]
+            row = pooled_df.iloc[i]
+            col = row.get("definition", f"Definition {i + 1}")
+
+            cm = np.array(
+                [
+                    [row.get("TN", 0), row.get("FP", 0)],
+                    [row.get("FN", 0), row.get("TP", 0)],
+                ]
+            )
+            total = cm.sum()
+            im = ax.imshow(cm, cmap="Blues", aspect="auto")
+            labels = ["No Delivery", "Delivery"]
+            ax.set_xticks([0, 1])
+            ax.set_yticks([0, 1])
+            ax.set_xticklabels(labels, fontsize=8)
+            ax.set_yticklabels(labels, fontsize=8)
+            ax.set_xlabel("EHR phenotype", fontsize=9)
+            ax.set_ylabel("Flowsheet", fontsize=9)
+            ax.set_title(str(col).replace("_", " "), fontsize=10, fontweight="bold")
+            for r in range(2):
+                for c in range(2):
+                    val = cm[r, c]
+                    pct = val / total * 100 if total > 0 else 0
+                    ax.text(
+                        c,
+                        r,
+                        f"{int(val):,}\n({pct:.1f}%)",
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color="white" if val > cm.max() / 2 else "black",
+                    )
+            sens = row.get("Sensitivity", np.nan)
+            sens_lo = row.get("Sensitivity_CI_low", np.nan)
+            sens_hi = row.get("Sensitivity_CI_high", np.nan)
+            spec = row.get("Specificity", np.nan)
+            spec_lo = row.get("Specificity_CI_low", np.nan)
+            spec_hi = row.get("Specificity_CI_high", np.nan)
+            metrics_text = (
+                f"Sens: {sens:.2f} ({sens_lo:.2f}-{sens_hi:.2f})\n"
+                f"Spec: {spec:.2f} ({spec_lo:.2f}-{spec_hi:.2f})\n"
+                f"Acc: {row.get('Accuracy', np.nan):.2f}  F1: {row.get('F1', np.nan):.2f}"
+            )
+            ax.text(0.5, -0.23, metrics_text, transform=ax.transAxes, ha="center", fontsize=8, family="monospace")
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        plt.tight_layout()
+        fig.savefig(output_path, bbox_inches="tight", dpi=300)
+        plt.close(fig)
+        print(f"Figure 3 saved from pooled concordance: {output_path}")
+        return
+
     # Attempt to find concordance files
     concordance_files = []
     for root, dirs, files in os.walk(data_dir):
@@ -641,6 +704,16 @@ def generate_pooled_table2(data_dir, output_dir):
 
 def generate_pooled_criterion_validity(data_dir, output_dir):
     """Pool criterion validity metrics across sites with bootstrap CIs."""
+    pooled_path = os.path.join(data_dir, "..", "final", "pooled", "pooled_concordance.csv")
+    if os.path.exists(pooled_path):
+        pooled_df = pd.read_csv(pooled_path)
+        pooled_df.to_csv(
+            os.path.join(output_dir, "table3_4_pooled_criterion_validity.csv"),
+            index=False,
+        )
+        print("  Pooled criterion validity copied from pooled_concordance.csv")
+        return
+
     concordance_files = []
     for root, dirs, files in os.walk(os.path.join(data_dir, "..")):
         for f in files:

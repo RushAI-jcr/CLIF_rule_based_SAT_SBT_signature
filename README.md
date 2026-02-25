@@ -1,165 +1,193 @@
-# Phenotyping Protocolized Liberation from Sedation and Invasive Mechanical Ventilation in the Electronic Health Record
+# SAT/SBT EHR Phenotyping (CLIF 2.1)
 
-**CLIF Version:** 2.1
+Computable EHR phenotypes for protocolized liberation from sedation and invasive mechanical ventilation:
 
-## Objective
+- SAT (Spontaneous Awakening Trial): eligibility + delivery detection
+- SBT (Spontaneous Breathing Trial): eligibility + delivery detection
 
-Develop and validate computable EHR phenotypes for two related objectives:
-1. Identifying **eligibility** for Spontaneous Awakening Trials (SATs) and Spontaneous Breathing Trials (SBTs)
-2. Detecting **delivery** of SATs and SBTs among eligible ventilator-days
+This repository is organized for federated multi-site CLIF workflows.
 
-Phenotypes are validated against clinician flowsheet documentation (criterion validity) and patient outcomes (construct validity) across a federated multi-site CLIF consortium.
+## Purpose And Clinical Question
 
-## Required CLIF Tables
+Primary question:
 
-Please refer to the [CLIF 2.1 data dictionary](https://clif-icu.com/data-dictionary) and [controlled vocabularies (mCIDE)](https://github.com/clif-consortium/CLIF) for constructing the required tables.
+- Among mechanically ventilated ICU patients, can we reliably identify SAT/SBT eligibility and delivery from EHR data, and are these phenotype detections associated with expected outcomes?
 
-| Table | Required Fields | Rationale |
+Core outputs:
+
+- Site-level phenotype delivery and concordance summaries
+- Pooled cross-site rates and manuscript-ready artifacts
+- Construct-validity outcome models (`code/03_outcome_models.py`)
+
+Statistical methods status and decisions are maintained in:
+
+- [`docs/statistical_methods_audit.md`](docs/statistical_methods_audit.md)
+- SAP traceability registry/report:
+  - [`docs/sap_requirement_registry.yaml`](docs/sap_requirement_registry.yaml)
+  - [`docs/sap_code_traceability.csv`](docs/sap_code_traceability.csv)
+  - [`docs/sap_audit_report.md`](docs/sap_audit_report.md)
+
+## SAP Version Pin
+
+- Authoritative plan: `Statistical_Analysis_Plan_SAT_SBT.docx`
+- Version date: February 24, 2026
+- Conformance policy: Python-native method-equivalent implementations allowed
+
+## Role Split
+
+Primary path:
+
+- Site implementer (local CLIF site): run `00`-`02`, generate site outputs.
+
+Secondary path:
+
+- Central analyst: aggregate site outputs, run pooled analyses and figures.
+
+## Minimum CLIF Data Contract
+
+Required CLIF tables and key fields:
+
+- `patient`: `patient_id`, `sex_category`, `race_category`, `ethnicity_category`
+- `hospitalization`: `patient_id`, `hospitalization_id`, `admission_dttm`, `discharge_dttm`, `age_at_admission`
+- `adt`: `hospitalization_id`, `in_dttm`, `location_category`, `hospital_id`
+- `medication_admin_continuous`: `hospitalization_id`, `admin_dttm`, `med_category`, `med_dose`, `med_dose_unit`, `mar_action_group`
+- `respiratory_support`: `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `mode_name`, `fio2_set`, `peep_set`, `pressure_support_set`, `tracheostomy`
+- `patient_assessments`: `hospitalization_id`, `recorded_dttm`, `assessment_category`, `numerical_value`, `categorical_value`
+- `vitals`: `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value`
+
+Reference sources:
+
+- CLIF 2.1 dictionary: <https://clif-icu.com/data-dictionary>
+- CLIF vocabularies: <https://github.com/clif-consortium/CLIF>
+
+## Environment And Runtime Matrix
+
+| Component | Requirement | Notes |
 |---|---|---|
-| `patient` | `patient_id`, `sex_category`, `race_category`, `ethnicity_category` | Demographics for Table 1 and covariate adjustment |
-| `hospitalization` | `patient_id`, `hospitalization_id`, `admission_dttm`, `discharge_dttm`, `age_at_admission` | Cohort identification, outcomes (mortality, LOS) |
-| `adt` | `hospitalization_id`, `in_dttm`, `location_category`, `hospital_id` | ICU admission identification, hospital-level variation |
-| `medication_admin_continuous` | `hospitalization_id`, `admin_dttm`, `med_category`, `med_dose`, `med_dose_unit`, `mar_action_group` | SAT eligibility (sedatives/opioids), SBT eligibility (vasopressors), paralytic exclusions |
-| `respiratory_support` | `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `mode_name`, `fio2_set`, `peep_set`, `pressure_support_set`, `tracheostomy` | IMV identification, SBT eligibility (controlled mode), SBT delivery (mode transition) |
-| `patient_assessments` | `hospitalization_id`, `recorded_dttm`, `assessment_category`, `numerical_value`, `categorical_value` | RASS scores, flowsheet SAT/SBT documentation |
-| `vitals` | `hospitalization_id`, `recorded_dttm`, `vital_category`, `vital_value` | SpO2 for SBT eligibility |
+| Python | 3.11+ recommended (3.9+ supported) | use virtual environment |
+| Dependencies | `pip install -r requirements.txt` | includes statsmodels/lifelines/marimo deps |
+| Authoring notebooks | `*.ipynb` | source-of-truth for interactive editing |
+| Executable notebooks | paired `*.py` Marimo files | committed alongside `ipynb` |
+| Notebook validation | `uvx marimo check code/<file>.py` | required for parity checks |
 
-**Relevant `med_category` values:**
-```
-norepinephrine, epinephrine, phenylephrine, angiotensin, vasopressin,
-dopamine, dobutamine, milrinone, isoproterenol,
-cisatracurium, vecuronium, rocuronium,
-fentanyl, propofol, lorazepam, midazolam, hydromorphone, morphine
-```
+## 15-Minute Quickstart (Site Implementer)
 
-**Relevant `assessment_category` values:**
-```
-sat_screen_pass_fail, sat_delivery_pass_fail,
-sbt_screen_pass_fail, sbt_delivery_pass_fail,
-rass, gcs_total
-```
-
-## Cohort Identification
-
-- **Study period:** January 1, 2022 -- December 31, 2024
-- **Inclusion:** Adults (age >= 18) with at least one ICU admission requiring invasive mechanical ventilation (IMV)
-- **Exclusion:** Tracheostomy patients, age > 119
-- **IMV episodes:** Defined by >= 72-hour gaps in ventilator support
-- **Minimum IMV duration:** 6 hours per episode
-
-## Expected Output
-
-Results are written to `output/` following CLIF naming conventions:
-
-| Output | Location | Description |
-|---|---|---|
-| Study cohort | `output/intermediate/study_cohort.parquet` | Eligible hospitalizations with ventilator-day-level data |
-| SAT results | `output/final/{SITE}/SAT_standard/` | Per-site SAT delivery rates, concordance, Table 1 |
-| SBT results | `output/final/{SITE}/SBT_standard/` | Per-site SBT delivery rates, concordance, Table 1 |
-| Pooled results | `output/final/pooled/` | Cross-site pooled rates, concordance, manuscript numbers |
-| Outcome models | `output/final/construct_validity_outcomes.csv` | Construct validity regression results |
-| Figures | `output/final/figures/` | Manuscript-ready figures (JAMA style) |
-| Sensitivity | `output/final/sensitivity/` | Data completeness, alternative thresholds |
-
-## Running the Project
-
-### 1. Configure
+1. Create environment:
 
 ```bash
-cp config/config_template.json config/config.json
-# Edit config.json with your site_name, tables_path, file_type, timezone
-```
-
-See [`config/README.md`](config/README.md) for details.
-
-### 2. Set up Python environment
-
-```bash
-# macOS / Linux
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-# Windows
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
 ```
 
-### 3. Run the pipeline
+2. Configure your site:
 
-Execute scripts **in order** from the `code/` directory:
-
-```
-Step 1:  00_cohort_id.ipynb              Cohort identification (must run first)
-Step 2:  01_SAT_standard.ipynb           SAT phenotyping + criterion validity    } run in
-         02_SBT_Standard.ipynb           SBT phenotyping + criterion validity    } parallel
-Step 3:  07_aggregate_sites.py           Pool cross-site results
-Step 4:  03_outcome_models.py            Construct validity models
-         04_hospital_variation.py        Hospital-level variation
-Step 5:  05_manuscript_figures.py        Manuscript figures (Figs 1-4)
-         06_sensitivity_analyses.py      Sensitivity analyses
+```bash
+cp config/config_template.json config/config.json
+# Edit config/config.json
 ```
 
-Steps 1-2 are run **at each CLIF site** locally. Steps 3-5 are run centrally on aggregated outputs.
+3. Run local pipeline in order (from `code/`):
 
-See [`code/README.md`](code/README.md) for detailed script documentation.
-
-### 4. Troubleshooting
-
-If you encounter errors, run notebooks cell-by-cell to identify the failing step. Common issues:
-- Missing `config/config.json` -- copy from template
-- Missing CLIF tables -- verify `tables_path` in config
-- Missing Python packages -- `pip install -r requirements.txt`
-
-## Project Structure
-
-```
-├── README.md                    This file
-├── LICENSE                      Apache-2.0
-├── requirements.txt             Python dependencies
-├── .gitignore                   Ignores data, outputs, configs
-│
-├── code/                        Analysis scripts (numbered execution order)
-│   ├── 00_cohort_id.ipynb
-│   ├── 01_SAT_standard.ipynb
-│   ├── 02_SBT_Standard.ipynb
-│   ├── 02_SBT_*.ipynb           SBT sensitivity variants
-│   ├── 03_outcome_models.py
-│   ├── 04_hospital_variation.py
-│   ├── 05_manuscript_figures.py
-│   ├── 06_sensitivity_analyses.py
-│   └── 07_aggregate_sites.py
-│
-├── config/                      Site-specific configuration (gitignored)
-│   ├── config_template.json
-│   └── outlier_config.json
-│
-├── utils/                       Shared utility modules
-│   ├── config.py                Config loader
-│   ├── pyCLIF.py                CLIF data loading and processing
-│   ├── pyCLIF2.py               Extended CLIF utilities
-│   ├── pySBT.py                 SBT/Table 1 helper functions
-│   ├── pySofa.py                SOFA score computation
-│   ├── definitions_source_of_truth.py   All phenotype definitions
-│   ├── site_output_schema.py    Federated output schema
-│   └── meta_analysis.py         Meta-analysis pooling functions
-│
-├── outlier-thresholds/          Outlier threshold CSVs
-│   ├── outlier_thresholds_adults_vitals.csv
-│   ├── outlier_thresholds_labs.csv
-│   └── outlier_thresholds_respiratory_support.csv
-│
-└── output/
-    ├── intermediate/            Per-site intermediate files
-    └── final/                   Final results for manuscript
-        ├── figures/
-        ├── pooled/
-        └── sensitivity/
+```bash
+cd code
+# Step 1
+python3 00_cohort_id.py
+# Step 2 (SAT + SBT)
+python3 01_SAT_standard.py
+python3 02_SBT_Standard.py
 ```
 
-## References
+4. Confirm expected artifacts:
 
-- Rojas JC, et al. A common longitudinal intensive care unit data format (CLIF) for critical illness research. *Intensive Care Med*. 2025;51(1).
-- CLIF 2.1 Data Dictionary: https://clif-icu.com/data-dictionary
-- CLIF Project Template: https://github.com/Common-Longitudinal-ICU-data-Format/CLIF-Project-Template
+- `output/intermediate/study_cohort.parquet`
+- `output/intermediate/final_df_SAT.csv`
+- `output/intermediate/final_df_SBT.csv`
+
+## Site-Local Runbook (Mandatory Order)
+
+1. Cohort build:
+
+- `00_cohort_id.ipynb` (or paired `.py`)
+- Output: `study_cohort.*`
+
+2. SAT phenotyping:
+
+- `01_SAT_standard.ipynb` (or paired `.py`)
+- Output: `final_df_SAT.csv` + SAT concordance artifacts
+
+3. SBT phenotyping:
+
+- `02_SBT_Standard.ipynb` (or paired `.py`)
+- Optional sensitivity variants: `02_SBT_*_Stability.*`
+- Output: `final_df_SBT.csv` + SBT concordance artifacts
+
+### Site QA Checks
+
+- Cohort cardinality checks: non-zero `patient_id`, `hospitalization_id`, `hosp_id_day_key`
+- Eligibility sanity: non-zero eligible SAT and SBT days
+- Delivery sanity: delivery rates in plausible range (0, 1)
+- Column availability: required assessment and medication categories present or explicitly missing by site policy
+
+## Central Aggregation Runbook (Brief)
+
+After site outputs are collected:
+
+1. `python3 code/07_aggregate_sites.py`
+2. `python3 code/03_outcome_models.py`
+3. `python3 code/04_hospital_variation.py`
+4. `python3 code/05_manuscript_figures.py`
+5. `python3 code/06_sensitivity_analyses.py`
+
+Primary pooled outputs:
+
+- `output/final/pooled/manuscript_numbers.json`
+- `output/final/construct_validity_outcomes.csv`
+- `output/final/construct_validity_vfd_components.csv`
+- `output/final/construct_validity_cif_curves.csv`
+- `output/final/construct_validity_multistate_transitions.csv`
+- `output/final/hospital_benchmarking_funnel_data.csv`
+
+## Reproducibility And Validation Checklist
+
+- [ ] `config/config.json` created from template and reviewed
+- [ ] Notebook parity confirmed (`ipynb` + paired `.py` exists for each numbered notebook)
+- [ ] `uvx marimo check` passes for paired notebook `.py` files
+- [ ] Python compile checks pass for `code/` and `utils/`
+- [ ] Local outputs regenerated from code (no stale committed artifacts)
+- [ ] Statistical method/version columns present in `construct_validity_outcomes.csv`
+
+## Troubleshooting Matrix
+
+| Symptom / Signature | Likely Cause | Fix |
+|---|---|---|
+| `FileNotFoundError: config/config.json` | config not initialized | copy template and fill required fields |
+| `column ... not found` in SAT/SBT notebooks | site CLIF mapping incomplete | validate table schema and controlled vocab mappings |
+| `lifelines not installed` | missing dependency | `pip install -r requirements.txt` |
+| `Model not fit - check dependencies or data` in outcomes CSV | too few events, separation, or missing covariates | inspect cohort size/events and required columns |
+| `marimo check ... failed to parse` | notebook `.py` drift or manual syntax issue | regenerate with `uvx marimo convert ...` and re-check |
+| all pooled rates empty in aggregation | site outputs missing or not discoverable | verify directory structure and filenames under `output/final/{SITE}/...` |
+
+## Project Layout
+
+```text
+claude-code-form/
+  code/                # numbered pipeline scripts + paired notebooks
+  config/              # local site config templates
+  docs/                # audit and method status docs
+  outlier-thresholds/  # threshold CSVs
+  output/              # generated artifacts (placeholders tracked)
+  utils/               # shared core modules
+```
+
+## Notebook Source-Of-Truth Policy
+
+- `*.ipynb` = authoring source
+- paired `*.py` Marimo notebook = executable artifact in version control
+
+After notebook edits:
+
+```bash
+uvx marimo convert code/<name>.ipynb -o code/<name>.py
+uvx marimo check code/<name>.py
+```

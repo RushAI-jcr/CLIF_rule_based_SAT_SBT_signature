@@ -1,0 +1,23 @@
+requirement_id,sap_section,requirement,file,function,status,evidence,owner
+SAP-4.3-CI-BCA,4,Criterion CIs use BCa bootstrap,utils/meta_analysis.py,cluster_bootstrap_concordance,match,BCa CI implementation with jackknife acceleration and provenance fields,codex
+SAP-4.3-CI-CLUSTER,4,Criterion CIs clustered at IMV episode with fallback,utils/meta_analysis.py,cluster_bootstrap_concordance,match,imv_episode_id primary with hospitalization and row-level fallback,codex
+SAP-4.4-CI-META,4,Random-effects meta-analysis for sensitivity/specificity with Q and I2,code/07_aggregate_sites.py,compute_pooled_concordance,match,run_meta_analysis invoked for sensitivity and specificity with heterogeneity output,codex
+SAP-5.2-COX-EXTUBATION,5,Cause-specific time-varying Cox extubation model,code/03_outcome_models.py,fit_cox_extubation,match,Cause-specific Cox retained with time-varying cummax exposure,codex
+SAP-5.3-VFD-FG,5,Fine-Gray-equivalent VFD primary model,code/03_outcome_models.py,run_all_models,match,fit_fine_gray_equivalent wired as VFD primary,codex
+SAP-5.3-VFD-COMPONENTS,5,VFD component outputs and CIF,code/03_outcome_models.py,run_all_models,match,construct_validity_vfd_components.csv and construct_validity_cif_curves.csv emitted,codex
+SAP-5.4-VFD-MULTISTATE,5,Multistate VFD secondary outputs,utils/multistate.py,fit_multistate_equivalent,match,Transition hazards and probability outputs generated and exported,codex
+SAP-5.5-ICU-LOS-MIXED,5,ICU LOS mixed-effects random-intercept model,code/03_outcome_models.py,fit_icu_los_model,match,PoissonBayesMixedGLM primary with GEE fallback,codex
+SAP-5.6-MORTALITY-MIXED,5,Mortality mixed-effects random-intercept model,code/03_outcome_models.py,fit_mortality_model,match,BinomialBayesMixedGLM primary with GEE fallback,codex
+SAP-5.8-JOINT-4LEVEL,5,Joint SAT+SBT 4-level exposure model,code/03_outcome_models.py,fit_joint_sat_sbt_four_level,match,neither/sat_only/sbt_only/both logistic contrast outputs,codex
+SAP-6.1-RSR-PEO,6,Hospital RSR Predicted Expected Overall formula,code/04_hospital_variation.py,compute_risk_adjusted_rates,match,Predicted_j Expected_j and adjusted_rate computed per SAP formula,codex
+SAP-6.2-MOR-VAR,6,MOR from model-estimated variance,code/04_hospital_variation.py,compute_adjusted_median_odds_ratio,match,sigma_u_sq from mixed model variance used for MOR,codex
+SAP-6.3-FUNNEL-95-998,6,Funnel limits 95 and 99.8 percent,code/04_hospital_variation.py,funnel_plot,match,compute_funnel_limits adds 95 and 99.8 control limits and output file,codex
+SAP-6.4-AGREEMENT-CCC,6,Agreement metrics include CCC,code/04_hospital_variation.py,concordance_ehr_vs_flowsheet,match,Pearson Spearman Bland-Altman and CCC reported,codex
+SAP-7.1-MISSING-LOCF-WINDOW,7,Missing-data LOCF windows by variable class,code/06_sensitivity_analyses.py,enforce_missing_data_windows,match,SAP windows enforced with variable-specific hour limits and audit output,codex
+SAP-7.2-ELIGIBILITY-MISSING-EXCLUSION,7,Eligibility exclusions for missing required sources,code/06_sensitivity_analyses.py,apply_eligibility_missing_source_exclusions,match,Eligible rows missing required source fields excluded and logged,codex
+SAP-8.1-POP-RESTRICTIONS,8,Sensitivity population restrictions implemented,code/06_sensitivity_analyses.py,sensitivity_exclusions,match,day0 day1 cardiac arrest comfort-care and TTM restriction execution added,codex
+SAP-8.2-COMPLETENESS-RERUNS,8,Completeness threshold reruns implemented,code/06_sensitivity_analyses.py,completeness_threshold_reruns,match,vent-settings and MAR >=90 percent rerun summaries emitted,codex
+SAP-9.1-MULTIPLICITY-NONE,9,No default multiplicity correction in primary outputs,code/03_outcome_models.py,run_all_models,match,disable_multiplicity default true and opt-in enable flag,codex
+SAP-9.2-ANALYSIS-ROLE-TAGS,9,analysis_role and prespec_status tags required,code/03_outcome_models.py,_attach_metadata,match,All model rows include analysis_role and prespec_status columns,codex
+SAP-10.1-TRACEABILITY-REGISTRY,10,Machine-readable requirement registry,docs/sap_requirement_registry.yaml,N/A,match,Registry added with IDs and sections,codex
+SAP-10.2-TRACEABILITY-GATE,10,Executable SAP conformance gate,scripts/audit_sap_alignment.py,main,match,Gate validates registry traceability status and interface markers,codex

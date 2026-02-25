@@ -25,17 +25,24 @@ Usage:
     python 07_aggregate_sites.py --data-dir ../output --output-dir ../output/final/pooled
 """
 
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir, "utils"))
+from __future__ import annotations
 
 
 import argparse
 import json
 import os
+import subprocess
+import sys
 import warnings
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
+
+UTILS_DIR = Path(__file__).resolve().parents[1] / "utils"
+if str(UTILS_DIR) not in sys.path:
+    sys.path.insert(0, str(UTILS_DIR))
 
 from definitions_source_of_truth import (
     SAT_SEDATIVES, SAT_OPIOIDS, PARALYTICS,
@@ -52,7 +59,7 @@ from definitions_source_of_truth import (
     MIN_AGE, MAX_AGE,
 )
 from site_output_schema import compute_site_se
-from meta_analysis import cluster_bootstrap_concordance
+from meta_analysis import cluster_bootstrap_concordance, run_meta_analysis
 
 warnings.filterwarnings("ignore")
 
@@ -61,7 +68,7 @@ warnings.filterwarnings("ignore")
 # 1. CONSORT NUMBERS
 # ============================================================
 
-def compute_consort_numbers(data_dir):
+def compute_consort_numbers(data_dir: str) -> dict[str, int]:
     """Extract CONSORT flow diagram numbers from pipeline outputs."""
     consort = {}
 
@@ -121,7 +128,7 @@ def compute_consort_numbers(data_dir):
 # 2. POOLED DELIVERY RATES
 # ============================================================
 
-def compute_pooled_delivery_rates(data_dir):
+def compute_pooled_delivery_rates(data_dir: str) -> pd.DataFrame:
     """Compute per-hospital delivery rates and pool across sites."""
     from meta_analysis import run_proportion_meta_analysis
 
@@ -243,6 +250,7 @@ def _bootstrap_ci_for_definition(
     day_df: pd.DataFrame,
     ehr_col: str,
     flowsheet_col: str,
+    n_boot: int = 1000,
 ) -> dict | None:
     """Run ``cluster_bootstrap_concordance`` for one concordance definition.
 
@@ -257,7 +265,7 @@ def _bootstrap_ci_for_definition(
             ehr_col=ehr_col,
             flowsheet_col=flowsheet_col,
             cluster_col="imv_episode_id",
-            n_boot=1000,
+            n_boot=n_boot,
             seed=42,
         )
     except Exception as exc:
@@ -265,13 +273,17 @@ def _bootstrap_ci_for_definition(
         return None
 
 
-def compute_pooled_concordance(data_dir):
+def compute_pooled_concordance(
+    data_dir: str,
+    concordance_meta_method: str = "reml",
+) -> pd.DataFrame:
     """Pool concordance metrics across sites from concordance_summary CSVs.
 
     After computing aggregate point estimates from the confusion-matrix
     summaries, the function attempts to load the raw day-level intermediate
-    data to run ``cluster_bootstrap_concordance`` and append 95% percentile
-    CI columns to each pooled row.
+    data to run ``cluster_bootstrap_concordance`` and append 95% BCa CI
+    columns to each pooled row. Also computes random-effects pooled
+    sensitivity/specificity heterogeneity metrics (Q, I2).
     """
     concordance_files = []
     for root, dirs, files in os.walk(os.path.join(data_dir, "final")):
@@ -354,6 +366,20 @@ def compute_pooled_concordance(data_dir):
                         "Accuracy", "Kappa"):
             row[f"{metric}_CI_low"] = np.nan
             row[f"{metric}_CI_high"] = np.nan
+        row["cluster_col_used"] = np.nan
+        row["ci_method"] = np.nan
+        row["n_boot"] = np.nan
+        row["bootstrap_level"] = np.nan
+        row["sensitivity_meta_re"] = np.nan
+        row["sensitivity_meta_ci_low"] = np.nan
+        row["sensitivity_meta_ci_high"] = np.nan
+        row["sensitivity_q"] = np.nan
+        row["sensitivity_i2"] = np.nan
+        row["specificity_meta_re"] = np.nan
+        row["specificity_meta_ci_low"] = np.nan
+        row["specificity_meta_ci_high"] = np.nan
+        row["specificity_q"] = np.nan
+        row["specificity_i2"] = np.nan
 
         pooled.append(row)
 
@@ -404,7 +430,7 @@ def compute_pooled_concordance(data_dir):
         grp = metrics_df[metrics_df[group_col] == definition]
         ehr_col, flowsheet_col = _col_pair_from_group(grp, definition)
 
-        boot = _bootstrap_ci_for_definition(day_df, ehr_col, flowsheet_col)
+        boot = _bootstrap_ci_for_definition(day_df, ehr_col, flowsheet_col, n_boot=1000)
         if boot is None:
             continue
 
@@ -422,10 +448,68 @@ def compute_pooled_concordance(data_dir):
             if boot_key in boot:
                 pooled_df.at[idx, f"{col_prefix}_CI_low"]  = boot[boot_key]["ci_low"]
                 pooled_df.at[idx, f"{col_prefix}_CI_high"] = boot[boot_key]["ci_high"]
+        pooled_df.at[idx, "cluster_col_used"] = boot.get("cluster_col_used")
+        pooled_df.at[idx, "ci_method"] = boot.get("ci_method")
+        pooled_df.at[idx, "n_boot"] = boot.get("n_boot")
+        pooled_df.at[idx, "bootstrap_level"] = boot.get("bootstrap_level")
 
         print(f"  Bootstrap CIs added for '{definition}' ({trial}): "
               f"n={boot['n_rows']} rows, {boot['n_clusters']} clusters "
               f"[{boot['cluster_col_used']}]")
+
+        # Random-effects meta-analysis for sensitivity/specificity across files.
+        if {"TP", "FN", "TN", "FP"}.issubset(grp.columns):
+            meta_df = grp.copy()
+            meta_df["site_label"] = meta_df.get("hospital_id", meta_df.get("source_file", "site")).astype(str)
+            # Sensitivity
+            sens_denom = (meta_df["TP"] + meta_df["FN"]).replace(0, np.nan)
+            meta_df["sens_est"] = meta_df["TP"] / sens_denom
+            meta_df["sens_se"] = np.sqrt(
+                (meta_df["sens_est"] * (1 - meta_df["sens_est"])) / sens_denom
+            )
+            sens_ready = meta_df[meta_df["sens_se"].gt(0) & meta_df["sens_est"].notna()].copy()
+            if len(sens_ready) >= 3:
+                try:
+                    sens_res, sens_summary = run_meta_analysis(
+                        sens_ready.rename(columns={"site_label": "site_name"}),
+                        estimate_col="sens_est",
+                        se_col="sens_se",
+                        label_col="site_name",
+                        method=concordance_meta_method,
+                    )
+                    sens_pooled = sens_summary[sens_summary["label"].str.startswith("Pooled")].iloc[0]
+                    pooled_df.at[idx, "sensitivity_meta_re"] = sens_pooled["eff"]
+                    pooled_df.at[idx, "sensitivity_meta_ci_low"] = sens_pooled["ci_low"]
+                    pooled_df.at[idx, "sensitivity_meta_ci_high"] = sens_pooled["ci_upp"]
+                    pooled_df.at[idx, "sensitivity_q"] = getattr(sens_res, "q", np.nan)
+                    pooled_df.at[idx, "sensitivity_i2"] = getattr(sens_res, "i2", np.nan)
+                except Exception as exc:
+                    print(f"  Sensitivity meta-analysis failed for '{definition}': {exc}")
+
+            # Specificity
+            spec_denom = (meta_df["TN"] + meta_df["FP"]).replace(0, np.nan)
+            meta_df["spec_est"] = meta_df["TN"] / spec_denom
+            meta_df["spec_se"] = np.sqrt(
+                (meta_df["spec_est"] * (1 - meta_df["spec_est"])) / spec_denom
+            )
+            spec_ready = meta_df[meta_df["spec_se"].gt(0) & meta_df["spec_est"].notna()].copy()
+            if len(spec_ready) >= 3:
+                try:
+                    spec_res, spec_summary = run_meta_analysis(
+                        spec_ready.rename(columns={"site_label": "site_name"}),
+                        estimate_col="spec_est",
+                        se_col="spec_se",
+                        label_col="site_name",
+                        method=concordance_meta_method,
+                    )
+                    spec_pooled = spec_summary[spec_summary["label"].str.startswith("Pooled")].iloc[0]
+                    pooled_df.at[idx, "specificity_meta_re"] = spec_pooled["eff"]
+                    pooled_df.at[idx, "specificity_meta_ci_low"] = spec_pooled["ci_low"]
+                    pooled_df.at[idx, "specificity_meta_ci_high"] = spec_pooled["ci_upp"]
+                    pooled_df.at[idx, "specificity_q"] = getattr(spec_res, "q", np.nan)
+                    pooled_df.at[idx, "specificity_i2"] = getattr(spec_res, "i2", np.nan)
+                except Exception as exc:
+                    print(f"  Specificity meta-analysis failed for '{definition}': {exc}")
 
     return pooled_df
 
@@ -434,7 +518,7 @@ def compute_pooled_concordance(data_dir):
 # 4. TABLE 1: OPERATIONAL DEFINITIONS
 # ============================================================
 
-def generate_table1_operational_definitions(output_path):
+def generate_table1_operational_definitions(output_path: str) -> pd.DataFrame:
     """Generate Table 1: operational definitions from source of truth.
 
     This is a descriptive table mapping each phenotype component to its
@@ -563,7 +647,11 @@ def generate_table1_operational_definitions(output_path):
 # 5. MANUSCRIPT NUMBERS JSON
 # ============================================================
 
-def compile_manuscript_numbers(consort, rates_df, concordance_df):
+def compile_manuscript_numbers(
+    consort: dict[str, Any],
+    rates_df: pd.DataFrame,
+    concordance_df: pd.DataFrame,
+) -> dict[str, Any]:
     """Compile all numbers needed for manuscript text into a single dict."""
     numbers = {}
 
@@ -629,7 +717,7 @@ def compile_manuscript_numbers(consort, rates_df, concordance_df):
 # 6. ESM TABLES
 # ============================================================
 
-def generate_esm_tables(data_dir, output_dir):
+def generate_esm_tables(data_dir: str, output_dir: str) -> dict[str, Any]:
     """Generate Electronic Supplementary Material tables for ICM submission.
 
     eTable 1: Construct validity outcome models
@@ -711,13 +799,44 @@ def generate_esm_tables(data_dir, output_dir):
 # MAIN
 # ============================================================
 
-def run_aggregation(data_dir, output_dir):
+def _run_sap_gate(require_sap_full_pass: bool) -> None:
+    """Run SAP traceability gate when requested."""
+    if not require_sap_full_pass:
+        return
+    repo_root = Path(__file__).resolve().parents[1]
+    audit_script = repo_root / "scripts" / "audit_sap_alignment.py"
+    if not audit_script.exists():
+        raise FileNotFoundError(
+            f"--require-sap-full-pass set but audit script missing: {audit_script}"
+        )
+    proc = subprocess.run(
+        [sys.executable, str(audit_script), "--fail-on-mismatch"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.stdout:
+        print(proc.stdout.strip())
+    if proc.returncode != 0:
+        if proc.stderr:
+            print(proc.stderr.strip())
+        raise RuntimeError("SAP full-pass gate failed (mismatch/partial requirement present)")
+
+
+def run_aggregation(
+    data_dir: str,
+    output_dir: str,
+    concordance_meta_method: str = "reml",
+    require_sap_full_pass: bool = False,
+) -> dict[str, Any]:
     """Run all site aggregation steps."""
     os.makedirs(output_dir, exist_ok=True)
 
     print("=" * 60)
     print("SITE AGGREGATION FOR MANUSCRIPT")
     print("=" * 60)
+    _run_sap_gate(require_sap_full_pass=require_sap_full_pass)
 
     # 1. CONSORT numbers
     print("\n1. Computing CONSORT numbers...")
@@ -735,7 +854,10 @@ def run_aggregation(data_dir, output_dir):
 
     # 3. Pooled concordance
     print("\n3. Computing pooled concordance...")
-    concordance_df = compute_pooled_concordance(data_dir)
+    concordance_df = compute_pooled_concordance(
+        data_dir,
+        concordance_meta_method=concordance_meta_method,
+    )
     if not concordance_df.empty:
         concordance_df.to_csv(os.path.join(output_dir, "pooled_concordance.csv"), index=False)
         print(f"  Pooled concordance:\n{concordance_df.to_string()}")
@@ -752,6 +874,7 @@ def run_aggregation(data_dir, output_dir):
 
     # 6. Manuscript numbers JSON
     print("\n6. Compiling manuscript numbers...")
+    numbers: dict[str, Any] = {}
     if not rates_df.empty or not concordance_df.empty:
         numbers = compile_manuscript_numbers(
             consort,
@@ -764,11 +887,33 @@ def run_aggregation(data_dir, output_dir):
         print(f"  Manuscript numbers saved: {numbers_path}")
 
     print(f"\nAll aggregation complete. Output: {output_dir}")
+    return {
+        "consort": consort,
+        "rates_df": rates_df,
+        "concordance_df": concordance_df,
+        "manuscript_numbers": numbers,
+    }
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Aggregate site outputs for manuscript")
     parser.add_argument("--data-dir", default="../output")
     parser.add_argument("--output-dir", default="../output/final/pooled")
+    parser.add_argument(
+        "--concordance-meta-method",
+        default="reml",
+        choices=["reml", "dl", "iterated"],
+        help="Random-effects method for concordance sensitivity/specificity pooling.",
+    )
+    parser.add_argument(
+        "--require-sap-full-pass",
+        action="store_true",
+        help="Fail run if SAP traceability audit contains any mismatch/partial rows.",
+    )
     args = parser.parse_args()
-    run_aggregation(args.data_dir, args.output_dir)
+    run_aggregation(
+        args.data_dir,
+        args.output_dir,
+        concordance_meta_method=args.concordance_meta_method,
+        require_sap_full_pass=args.require_sap_full_pass,
+    )
