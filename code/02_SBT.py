@@ -130,33 +130,37 @@ def _(pd, pl):
 
 # ---------------------------------------------------------------------------
 # Cell 6 — RUSH-specific SBT timepoint adjustment (site-defensive)
+#   FIX: avoid cross-cell mutation — work on a copy, return it.
 # ---------------------------------------------------------------------------
 @app.cell
 def _(cohort, pc):
-    if pc.helper.get("site_name") == "RUSH" and "sbt_timepoint" in cohort.columns:
-        cohort.loc[
-            cohort["sbt_timepoint"] == "3-5 minute evaluation",
+    cohort_adj = cohort.copy()
+    if pc.helper.get("site_name") == "RUSH" and "sbt_timepoint" in cohort_adj.columns:
+        cohort_adj.loc[
+            cohort_adj["sbt_timepoint"] == "3-5 minute evaluation",
             "pressure_support_set",
         ] = 6.1
-        cohort.loc[
-            cohort["sbt_timepoint"] == "3-5 minute evaluation",
+        cohort_adj.loc[
+            cohort_adj["sbt_timepoint"] == "3-5 minute evaluation",
             "mode_category",
         ] = "pressure support/cpap"
         print("RUSH-specific SBT timepoint adjustment applied.")
-    return
+    return (cohort_adj,)
 
 
 # ---------------------------------------------------------------------------
 # Cell 7 — Eligibility flag computation
+#   FIX: use cohort_adj (from Cell 6) and start with .copy()
 # ---------------------------------------------------------------------------
 @app.cell
-def _(cohort, pc, pd):
-    cohort['event_time'] = pd.to_datetime(cohort['event_time'])
-    cohort['admission_dttm'] = pc.getdttm(cohort['admission_dttm'])
-    cohort['discharge_dttm'] = pc.getdttm(cohort['discharge_dttm'])
+def _(cohort_adj, pc, pd):
+    _cohort = cohort_adj.copy()
+    _cohort['event_time'] = pd.to_datetime(_cohort['event_time'])
+    _cohort['admission_dttm'] = pc.getdttm(_cohort['admission_dttm'])
+    _cohort['discharge_dttm'] = pc.getdttm(_cohort['discharge_dttm'])
 
     cohort_1 = (
-        cohort
+        _cohort
         .sort_values(by=['hospitalization_id', 'event_time'])
         .reset_index(drop=True)
     )
@@ -345,45 +349,44 @@ def _(final_df_3, pd, plt):
 
 # ---------------------------------------------------------------------------
 # Cell 11 — Day-level aggregation + documented-column normalization
+#   FIX: merged the two mutating cells into one; work on a copy (final_df_4).
 # ---------------------------------------------------------------------------
 @app.cell
 def _(final_df_3, np):
+    final_df_4 = final_df_3.copy()
+
     # Corrected _documented column logic (Standard notebook pattern):
     # sbt_delivery_pass_fail_documented == 1.0 when a value is present; NaN otherwise.
-    # This avoids the old {0:1, 1:1} mapping that collapsed pass/fail into one category.
-    final_df_3['sbt_bkp'] = final_df_3['sbt_delivery_pass_fail']
-    final_df_3['sbt_delivery_pass_fail_documented'] = (
-        final_df_3['sbt_delivery_pass_fail'].notna().astype(float)
+    final_df_4['sbt_bkp'] = final_df_4['sbt_delivery_pass_fail']
+    final_df_4['sbt_delivery_pass_fail_documented'] = (
+        final_df_4['sbt_delivery_pass_fail'].notna().astype(float)
     )
-    final_df_3['sbt_delivery_pass_fail_documented'] = (
-        final_df_3['sbt_delivery_pass_fail_documented'].replace(0, np.nan)
+    final_df_4['sbt_delivery_pass_fail_documented'] = (
+        final_df_4['sbt_delivery_pass_fail_documented'].replace(0, np.nan)
     )
-    final_df_3['sbt_screen_pass_fail_documented'] = (
-        final_df_3['sbt_screen_pass_fail'].notna().astype(float)
+    final_df_4['sbt_screen_pass_fail_documented'] = (
+        final_df_4['sbt_screen_pass_fail'].notna().astype(float)
     )
-    final_df_3['sbt_screen_pass_fail_documented'] = (
-        final_df_3['sbt_screen_pass_fail_documented'].replace(0, np.nan)
+    final_df_4['sbt_screen_pass_fail_documented'] = (
+        final_df_4['sbt_screen_pass_fail_documented'].replace(0, np.nan)
     )
-    final_df_3['flip_skip_reason'] = (
-        final_df_3.groupby('hosp_id_day_key')['flip_skip_reason']
+    final_df_4['flip_skip_reason'] = (
+        final_df_4.groupby('hosp_id_day_key')['flip_skip_reason']
         .transform(lambda x: x.ffill().bfill())
     )
-    return
 
-
-@app.cell
-def _(final_df_3):
     # Convert EHR delivery window columns to binary presence flags
     _datetime_cols = ['EHR_Delivery_2mins', 'EHR_Delivery_30mins']
     for _col in _datetime_cols:
-        if _col in final_df_3.columns:
-            final_df_3[_col] = final_df_3[_col].notna().astype(int)
-    return
+        if _col in final_df_4.columns:
+            final_df_4[_col] = final_df_4[_col].notna().astype(int)
+
+    return (final_df_4,)
 
 
 @app.cell
-def _(final_df_3, pl):
-    _pl_df = pl.from_pandas(final_df_3[
+def _(final_df_4, pl):
+    _pl_df = pl.from_pandas(final_df_4[
         ['hosp_id_day_key', 'hospitalization_id', 'hospital_id', 'eligible_day',
          'EHR_Delivery_2mins', 'EHR_Delivery_30mins', 'sbt_screen_pass_fail',
          'sbt_delivery_pass_fail', 'flag_2_45_extubated', 'flip_skip_reason',
@@ -460,85 +463,157 @@ def _(directory_path, grouped_df, pl):
 
 
 # ---------------------------------------------------------------------------
-# Cell 13 — Concordance analysis (confusion matrices + Cohen kappa)
+# Cell 13a — Shared concordance helper function
+#   FIX: extracted from 4 near-identical blocks; defined in its own cell.
 # ---------------------------------------------------------------------------
-
-# --- EHR 2-min vs SBT delivery flag ---
 @app.cell
 def _(
     accuracy_score,
     cohen_kappa_score,
     confusion_matrix,
-    directory_path,
     f1_score,
-    mat_df,
     pd,
     plt,
     precision_score,
     recall_score,
     sns,
 ):
-    _hospital_ids = mat_df['hospital_id'].unique()
-    mat_df['sbt_delivery_pass_fail'] = mat_df['sbt_delivery_pass_fail'].fillna(0)
-    metrics_list_2min = []
-    for _hosp in _hospital_ids:
-        _df_hosp = mat_df[mat_df['hospital_id'] == _hosp]
-        if _df_hosp['sbt_delivery_pass_fail'].nunique() <= 1:
-            continue
-        _conf_matrix = pd.crosstab(
-            _df_hosp['EHR_Delivery_2mins'], _df_hosp['sbt_delivery_pass_fail']
-        )
-        _conf_matrix_percent = _conf_matrix / _conf_matrix.values.sum() * 100
-        _annot = (
-            _conf_matrix.astype(str) + '\n'
-            + _conf_matrix_percent.round(1).astype(str) + '%'
-        )
-        plt.figure(figsize=(6, 4))
-        sns.heatmap(
-            _conf_matrix, annot=_annot, fmt='', cmap='Blues',
-            xticklabels=['0', '1'], yticklabels=['0', '1'],
-        )
-        plt.xlabel('SBT Delivery in Flowsheet')
-        plt.ylabel('EHR Delivery in 2 minutes')
-        plt.title(f'Confusion Matrix for Hospital {_hosp}')
-        plt.savefig(f'{directory_path}/confusion_matrix_{_hosp}_by_SBT.png')
-        plt.close()
-        _y_true = _df_hosp['EHR_Delivery_2mins']
-        _y_pred = _df_hosp['sbt_delivery_pass_fail']
-        _tn, _fp, _fn, _tp = confusion_matrix(_y_true, _y_pred).ravel()
-        _accuracy = accuracy_score(_y_true, _y_pred)
-        _precision = precision_score(_y_true, _y_pred, zero_division=0)
-        _recall = recall_score(_y_true, _y_pred, zero_division=0)
-        _f1 = f1_score(_y_true, _y_pred, zero_division=0)
-        _specificity = _tn / (_tn + _fp) if (_tn + _fp) != 0 else 0
-        _kappa = cohen_kappa_score(_y_true, _y_pred)
-        print(f'Hospital ID : {_hosp}')
-        print(f'Accuracy    : {_accuracy:.3f}')
-        print(f'Precision   : {_precision:.3f}')
-        print(f'Recall      : {_recall:.3f}')
-        print(f'F1 Score    : {_f1:.3f}')
-        print(f'Specificity : {_specificity:.3f}')
-        print(f'Cohen Kappa : {_kappa:.3f}\n')
-        _metrics_dict = {
-            'True Positives (TP)': _tp, 'False Positives (FP)': _fp,
-            'False Negatives (FN)': _fn, 'True Negatives (TN)': _tn,
-            'Accuracy': _accuracy, 'Precision': _precision,
-            'Recall': _recall, 'F1 Score': _f1,
-            'Specificity': _specificity, 'Cohen_Kappa': _kappa,
-        }
-        _df_metrics = pd.DataFrame(
-            list(_metrics_dict.items()), columns=['Metric', 'Value']
-        )
-        _df_metrics.to_csv(
-            f'{directory_path}/EHR_2min_vs_SBT_metrics_{_hosp}.csv', index=False
-        )
-        metrics_list_2min.append({
-            'Column': 'EHR_Delivery_2mins', 'hospital_id': _hosp,
-            'TP': _tp, 'FP': _fp, 'FN': _fn, 'TN': _tn,
-            'Accuracy': _accuracy, 'Precision': _precision,
-            'Recall': _recall, 'F1 Score': _f1,
-            'Specificity': _specificity, 'Cohen_Kappa': _kappa,
-        })
+    def _run_concordance(
+        df,
+        y_true_col: str,
+        y_pred_col: str,
+        label: str,
+        directory_path_arg: str,
+        fillna_cols: list[str] | None = None,
+        include_kappa: bool = False,
+    ):
+        """Run per-hospital concordance analysis and save results.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Already-copied dataframe (caller must pass a copy).
+        y_true_col : str
+            Column name for the ground-truth labels.
+        y_pred_col : str
+            Column name for the predicted labels.
+        label : str
+            File-name label for saved artifacts.
+        directory_path_arg : str
+            Output directory.
+        fillna_cols : list[str] | None
+            Columns to .fillna(0) before analysis.
+        include_kappa : bool
+            Whether to compute and return Cohen's kappa.
+
+        Returns
+        -------
+        list[dict] | None
+            Metrics list if include_kappa is True, else None.
+        """
+        _work = df.copy()
+        if fillna_cols:
+            for _c in fillna_cols:
+                _work[_c] = _work[_c].fillna(0)
+
+        _hospital_ids = _work['hospital_id'].unique()
+        _metrics_list = [] if include_kappa else None
+
+        for _hosp in _hospital_ids:
+            _df_hosp = _work[_work['hospital_id'] == _hosp]
+            if include_kappa and _df_hosp[y_pred_col].nunique() <= 1:
+                continue
+            _conf_matrix = pd.crosstab(_df_hosp[y_true_col], _df_hosp[y_pred_col])
+            _conf_matrix_percent = _conf_matrix / _conf_matrix.values.sum() * 100
+            _annot = (
+                _conf_matrix.astype(str) + '\n'
+                + _conf_matrix_percent.round(1).astype(str) + '%'
+            )
+            plt.figure(figsize=(6, 4))
+            sns.heatmap(
+                _conf_matrix, annot=_annot, fmt='', cmap='Blues',
+                xticklabels=['0', '1'], yticklabels=['0', '1'],
+            )
+            plt.xlabel(y_pred_col)
+            plt.ylabel(y_true_col)
+            plt.title(f'Confusion Matrix for Hospital {_hosp}')
+            plt.savefig(f'{directory_path_arg}/{label}_{_hosp}.png')
+            plt.close()
+
+            _y_true = _df_hosp[y_true_col]
+            _y_pred = _df_hosp[y_pred_col]
+            _tn, _fp, _fn, _tp = confusion_matrix(_y_true, _y_pred).ravel()
+            _accuracy = accuracy_score(_y_true, _y_pred)
+            _precision = precision_score(_y_true, _y_pred, zero_division=0)
+            _recall = recall_score(_y_true, _y_pred, zero_division=0)
+            _f1 = f1_score(_y_true, _y_pred, zero_division=0)
+            _specificity = _tn / (_tn + _fp) if (_tn + _fp) != 0 else 0
+
+            _metrics_dict = {
+                'True Positives (TP)': _tp, 'False Positives (FP)': _fp,
+                'False Negatives (FN)': _fn, 'True Negatives (TN)': _tn,
+                'Accuracy': _accuracy, 'Precision': _precision,
+                'Recall': _recall, 'F1 Score': _f1,
+                'Specificity': _specificity,
+            }
+
+            if include_kappa:
+                _kappa = cohen_kappa_score(_y_true, _y_pred)
+                _metrics_dict['Cohen_Kappa'] = _kappa
+            else:
+                _kappa = None
+
+            print(f'Hospital ID : {_hosp}')
+            print(f'Accuracy    : {_accuracy:.3f}')
+            print(f'Precision   : {_precision:.3f}')
+            print(f'Recall      : {_recall:.3f}')
+            print(f'F1 Score    : {_f1:.3f}')
+            print(f'Specificity : {_specificity:.3f}')
+            if _kappa is not None:
+                print(f'Cohen Kappa : {_kappa:.3f}')
+            print()
+
+            _df_metrics = pd.DataFrame(
+                list(_metrics_dict.items()), columns=['Metric', 'Value']
+            )
+            _df_metrics.to_csv(
+                f'{directory_path_arg}/{label}_metrics_{_hosp}.csv', index=False
+            )
+
+            if _metrics_list is not None:
+                _row = {
+                    'Column': y_true_col, 'hospital_id': _hosp,
+                    'TP': _tp, 'FP': _fp, 'FN': _fn, 'TN': _tn,
+                    'Accuracy': _accuracy, 'Precision': _precision,
+                    'Recall': _recall, 'F1 Score': _f1,
+                    'Specificity': _specificity,
+                }
+                if _kappa is not None:
+                    _row['Cohen_Kappa'] = _kappa
+                _metrics_list.append(_row)
+
+        return _metrics_list
+
+    return (_run_concordance,)
+
+
+# ---------------------------------------------------------------------------
+# Cell 13 — Concordance analysis (confusion matrices + Cohen kappa)
+#   FIX: use _run_concordance helper; use mat_df via copy inside helper.
+# ---------------------------------------------------------------------------
+
+# --- EHR 2-min vs SBT delivery flag ---
+@app.cell
+def _(directory_path, mat_df, pd, _run_concordance):
+    metrics_list_2min = _run_concordance(
+        mat_df,
+        y_true_col='EHR_Delivery_2mins',
+        y_pred_col='sbt_delivery_pass_fail',
+        label='confusion_matrix_by_SBT',
+        directory_path_arg=directory_path,
+        fillna_cols=['sbt_delivery_pass_fail'],
+        include_kappa=True,
+    )
     if metrics_list_2min:
         pd.DataFrame(metrics_list_2min).to_csv(
             f'{directory_path}/delivery_concordance_summary_2min.csv', index=False
@@ -548,206 +623,46 @@ def _(
 
 # --- EHR 2-min vs Extubated flag ---
 @app.cell
-def _(
-    accuracy_score,
-    confusion_matrix,
-    directory_path,
-    f1_score,
-    mat_df,
-    pd,
-    plt,
-    precision_score,
-    recall_score,
-    sns,
-):
-    _hospital_ids = mat_df['hospital_id'].unique()
-    mat_df['extubated'] = mat_df['extubated'].fillna(0)
-    for _hosp in _hospital_ids:
-        _df_hosp = mat_df[mat_df['hospital_id'] == _hosp]
-        _conf_matrix = pd.crosstab(_df_hosp['EHR_Delivery_2mins'], _df_hosp['extubated'])
-        _conf_matrix_percent = _conf_matrix / _conf_matrix.values.sum() * 100
-        _annot = (
-            _conf_matrix.astype(str) + '\n'
-            + _conf_matrix_percent.round(1).astype(str) + '%'
-        )
-        plt.figure(figsize=(6, 4))
-        sns.heatmap(
-            _conf_matrix, annot=_annot, fmt='', cmap='Blues',
-            xticklabels=['0', '1'], yticklabels=['0', '1'],
-        )
-        plt.xlabel('Extubated')
-        plt.ylabel('EHR Delivery in 2 minutes')
-        plt.title(f'Confusion Matrix for Hospital {_hosp}')
-        plt.savefig(f'{directory_path}/confusion_matrix_{_hosp}_by_extubated.png')
-        plt.close()
-        _y_true = _df_hosp['EHR_Delivery_2mins']
-        _y_pred = _df_hosp['extubated']
-        _tn, _fp, _fn, _tp = confusion_matrix(_y_true, _y_pred).ravel()
-        _accuracy = accuracy_score(_y_true, _y_pred)
-        _precision = precision_score(_y_true, _y_pred, zero_division=0)
-        _recall = recall_score(_y_true, _y_pred, zero_division=0)
-        _f1 = f1_score(_y_true, _y_pred, zero_division=0)
-        _specificity = _tn / (_tn + _fp) if (_tn + _fp) != 0 else 0
-        print(f'Hospital ID : {_hosp}')
-        print(f'Accuracy    : {_accuracy:.3f}')
-        print(f'Precision   : {_precision:.3f}')
-        print(f'Recall      : {_recall:.3f}')
-        print(f'F1 Score    : {_f1:.3f}')
-        print(f'Specificity : {_specificity:.3f}\n')
-        _metrics_dict = {
-            'True Positives (TP)': _tp, 'False Positives (FP)': _fp,
-            'False Negatives (FN)': _fn, 'True Negatives (TN)': _tn,
-            'Accuracy': _accuracy, 'Precision': _precision,
-            'Recall': _recall, 'F1 Score': _f1, 'Specificity': _specificity,
-        }
-        _df_metrics = pd.DataFrame(
-            list(_metrics_dict.items()), columns=['Metric', 'Value']
-        )
-        _df_metrics.to_csv(
-            f'{directory_path}/EHR_2min_VS_EXTUBATED_metrics_{_hosp}.csv', index=False
-        )
+def _(directory_path, mat_df, _run_concordance):
+    _run_concordance(
+        mat_df,
+        y_true_col='EHR_Delivery_2mins',
+        y_pred_col='extubated',
+        label='confusion_matrix_by_extubated',
+        directory_path_arg=directory_path,
+        fillna_cols=['extubated'],
+        include_kappa=False,
+    )
     return
 
 
 # --- EHR 30-min vs Extubated flag ---
 @app.cell
-def _(
-    accuracy_score,
-    confusion_matrix,
-    directory_path,
-    f1_score,
-    mat_df,
-    pd,
-    plt,
-    precision_score,
-    recall_score,
-    sns,
-):
-    _hospital_ids = mat_df['hospital_id'].unique()
-    mat_df['extubated'] = mat_df['extubated'].fillna(0)
-    for _hosp in _hospital_ids:
-        _df_hosp = mat_df[mat_df['hospital_id'] == _hosp]
-        _conf_matrix = pd.crosstab(_df_hosp['EHR_Delivery_30mins'], _df_hosp['extubated'])
-        _conf_matrix_percent = _conf_matrix / _conf_matrix.values.sum() * 100
-        _annot = (
-            _conf_matrix.astype(str) + '\n'
-            + _conf_matrix_percent.round(1).astype(str) + '%'
-        )
-        plt.figure(figsize=(6, 4))
-        sns.heatmap(
-            _conf_matrix, annot=_annot, fmt='', cmap='Blues',
-            xticklabels=['0', '1'], yticklabels=['0', '1'],
-        )
-        plt.xlabel('Extubated')
-        plt.ylabel('EHR Delivery in 30 minutes')
-        plt.title(f'Confusion Matrix for Hospital {_hosp}')
-        plt.savefig(f'{directory_path}/ehr_30_confusion_matrix_{_hosp}_by_extubated.png')
-        plt.close()
-        _y_true = _df_hosp['EHR_Delivery_30mins']
-        _y_pred = _df_hosp['extubated']
-        _tn, _fp, _fn, _tp = confusion_matrix(_y_true, _y_pred).ravel()
-        _accuracy = accuracy_score(_y_true, _y_pred)
-        _precision = precision_score(_y_true, _y_pred, zero_division=0)
-        _recall = recall_score(_y_true, _y_pred, zero_division=0)
-        _f1 = f1_score(_y_true, _y_pred, zero_division=0)
-        _specificity = _tn / (_tn + _fp) if (_tn + _fp) != 0 else 0
-        print(f'Hospital ID : {_hosp}')
-        print(f'Accuracy    : {_accuracy:.3f}')
-        print(f'Precision   : {_precision:.3f}')
-        print(f'Recall      : {_recall:.3f}')
-        print(f'F1 Score    : {_f1:.3f}')
-        print(f'Specificity : {_specificity:.3f}\n')
-        _metrics_dict = {
-            'True Positives (TP)': _tp, 'False Positives (FP)': _fp,
-            'False Negatives (FN)': _fn, 'True Negatives (TN)': _tn,
-            'Accuracy': _accuracy, 'Precision': _precision,
-            'Recall': _recall, 'F1 Score': _f1, 'Specificity': _specificity,
-        }
-        _df_metrics = pd.DataFrame(
-            list(_metrics_dict.items()), columns=['Metric', 'Value']
-        )
-        _df_metrics.to_csv(
-            f'{directory_path}/EHR_30_VS_EXTUBATED_metrics_{_hosp}.csv', index=False
-        )
+def _(directory_path, mat_df, _run_concordance):
+    _run_concordance(
+        mat_df,
+        y_true_col='EHR_Delivery_30mins',
+        y_pred_col='extubated',
+        label='ehr_30_confusion_matrix_by_extubated',
+        directory_path_arg=directory_path,
+        fillna_cols=['extubated'],
+        include_kappa=False,
+    )
     return
 
 
 # --- EHR 30-min vs SBT delivery flag ---
 @app.cell
-def _(
-    accuracy_score,
-    cohen_kappa_score,
-    confusion_matrix,
-    directory_path,
-    f1_score,
-    mat_df,
-    pd,
-    plt,
-    precision_score,
-    recall_score,
-    sns,
-):
-    _hospital_ids = mat_df['hospital_id'].unique()
-    mat_df['sbt_delivery_pass_fail'] = mat_df['sbt_delivery_pass_fail'].fillna(0)
-    metrics_list_30min = []
-    for _hosp in _hospital_ids:
-        _df_hosp = mat_df[mat_df['hospital_id'] == _hosp]
-        if _df_hosp['sbt_delivery_pass_fail'].nunique() <= 1:
-            continue
-        _conf_matrix = pd.crosstab(
-            _df_hosp['EHR_Delivery_30mins'], _df_hosp['sbt_delivery_pass_fail']
-        )
-        _conf_matrix_percent = _conf_matrix / _conf_matrix.values.sum() * 100
-        _annot = (
-            _conf_matrix.astype(str) + '\n'
-            + _conf_matrix_percent.round(1).astype(str) + '%'
-        )
-        plt.figure(figsize=(6, 4))
-        sns.heatmap(
-            _conf_matrix, annot=_annot, fmt='', cmap='Blues',
-            xticklabels=['0', '1'], yticklabels=['0', '1'],
-        )
-        plt.xlabel('SBT Delivery in Flowsheet')
-        plt.ylabel('EHR Delivery in 30 minutes')
-        plt.title(f'Confusion Matrix for Hospital {_hosp}')
-        plt.savefig(f'{directory_path}/ehr_30_confusion_matrix_{_hosp}_by_SBT.png')
-        plt.close()
-        _y_true = _df_hosp['EHR_Delivery_30mins']
-        _y_pred = _df_hosp['sbt_delivery_pass_fail']
-        _tn, _fp, _fn, _tp = confusion_matrix(_y_true, _y_pred).ravel()
-        _accuracy = accuracy_score(_y_true, _y_pred)
-        _precision = precision_score(_y_true, _y_pred, zero_division=0)
-        _recall = recall_score(_y_true, _y_pred, zero_division=0)
-        _f1 = f1_score(_y_true, _y_pred, zero_division=0)
-        _specificity = _tn / (_tn + _fp) if (_tn + _fp) != 0 else 0
-        _kappa = cohen_kappa_score(_y_true, _y_pred)
-        print(f'Hospital ID : {_hosp}')
-        print(f'Accuracy    : {_accuracy:.3f}')
-        print(f'Precision   : {_precision:.3f}')
-        print(f'Recall      : {_recall:.3f}')
-        print(f'F1 Score    : {_f1:.3f}')
-        print(f'Specificity : {_specificity:.3f}')
-        print(f'Cohen Kappa : {_kappa:.3f}\n')
-        _metrics_dict = {
-            'True Positives (TP)': _tp, 'False Positives (FP)': _fp,
-            'False Negatives (FN)': _fn, 'True Negatives (TN)': _tn,
-            'Accuracy': _accuracy, 'Precision': _precision,
-            'Recall': _recall, 'F1 Score': _f1,
-            'Specificity': _specificity, 'Cohen_Kappa': _kappa,
-        }
-        _df_metrics = pd.DataFrame(
-            list(_metrics_dict.items()), columns=['Metric', 'Value']
-        )
-        _df_metrics.to_csv(
-            f'{directory_path}/EHR_30_vs_SBT_metrics_{_hosp}.csv', index=False
-        )
-        metrics_list_30min.append({
-            'Column': 'EHR_Delivery_30mins', 'hospital_id': _hosp,
-            'TP': _tp, 'FP': _fp, 'FN': _fn, 'TN': _tn,
-            'Accuracy': _accuracy, 'Precision': _precision,
-            'Recall': _recall, 'F1 Score': _f1,
-            'Specificity': _specificity, 'Cohen_Kappa': _kappa,
-        })
+def _(directory_path, mat_df, pd, _run_concordance):
+    metrics_list_30min = _run_concordance(
+        mat_df,
+        y_true_col='EHR_Delivery_30mins',
+        y_pred_col='sbt_delivery_pass_fail',
+        label='ehr_30_confusion_matrix_by_SBT',
+        directory_path_arg=directory_path,
+        fillna_cols=['sbt_delivery_pass_fail'],
+        include_kappa=True,
+    )
     if metrics_list_30min:
         pd.DataFrame(metrics_list_30min).to_csv(
             f'{directory_path}/delivery_concordance_summary_30min.csv', index=False
@@ -757,141 +672,142 @@ def _(
 
 # ---------------------------------------------------------------------------
 # Cell 14 — Failure-to-detect analysis (FLIP vs SBT flag + vs Extubated)
+#   FIX: _build_failure_summary wrapped in @app.cell so it is visible.
 # ---------------------------------------------------------------------------
+@app.cell
+def _(pd):
+    def _build_failure_summary(
+        final_df_arg,
+        mat_df_arg,
+        eligible_days_arg,
+        reference_col: str,
+        directory_path_arg: str,
+        prefix: str,
+    ) -> None:
+        """
+        Shared logic for failure-to-detect analysis.
 
-def _build_failure_summary(
-    final_df_3_arg,
-    mat_df_arg,
-    eligible_days_arg,
-    reference_col: str,
-    directory_path_arg: str,
-    pd_arg,
-    prefix: str,
-) -> None:
-    """
-    Shared logic for failure-to-detect analysis.
-
-    Parameters
-    ----------
-    reference_col : str
-        Either 'sbt_delivery_pass_fail' or 'extubated'.
-    prefix : str
-        File-name prefix, e.g. 'EHR_VS_SBT' or 'EHR_VS_EXTUBATED'.
-    """
-    _condition_cols = [
-        'flip_skip_reason',
-        'cond_device_imv',
-        'cond_location_icu',
-        'cond_peep_set_le8',
-        'cond_ps_set_le8',
-        'cond_mode_ps_cpap',
-    ]
-    for _hosp in mat_df_arg['hospital_id'].unique():
-        _mat_hosp = mat_df_arg[mat_df_arg['hospital_id'] == _hosp]
-        _filtered_keys = _mat_hosp.loc[
-            (_mat_hosp['EHR_Delivery_2mins'] == 0)
-            & (_mat_hosp[reference_col] == 1),
-            'hosp_id_day_key',
-        ].unique()
-        _fdf = final_df_3_arg.loc[
-            (final_df_3_arg[reference_col] == 1)
-            & final_df_3_arg['hosp_id_day_key'].isin(_filtered_keys)
+        Parameters
+        ----------
+        reference_col : str
+            Either 'sbt_delivery_pass_fail' or 'extubated'.
+        prefix : str
+            File-name prefix, e.g. 'EHR_VS_SBT' or 'EHR_VS_EXTUBATED'.
+        """
+        _condition_cols = [
+            'flip_skip_reason',
+            'cond_device_imv',
+            'cond_location_icu',
+            'cond_peep_set_le8',
+            'cond_ps_set_le8',
+            'cond_mode_ps_cpap',
         ]
-        _fdf = (
-            _fdf.sort_values('event_time')
-            .drop_duplicates(subset='hosp_id_day_key', keep='first')
-        )
-        print(f'Hospital: {_hosp}, filtered shape: {_fdf.shape}')
+        for _hosp in mat_df_arg['hospital_id'].unique():
+            _mat_hosp = mat_df_arg[mat_df_arg['hospital_id'] == _hosp]
+            _filtered_keys = _mat_hosp.loc[
+                (_mat_hosp['EHR_Delivery_2mins'] == 0)
+                & (_mat_hosp[reference_col] == 1),
+                'hosp_id_day_key',
+            ].unique()
+            _fdf = final_df_arg.loc[
+                (final_df_arg[reference_col] == 1)
+                & final_df_arg['hosp_id_day_key'].isin(_filtered_keys)
+            ]
+            _fdf = (
+                _fdf.sort_values('event_time')
+                .drop_duplicates(subset='hosp_id_day_key', keep='first')
+            )
+            print(f'Hospital: {_hosp}, filtered shape: {_fdf.shape}')
 
-        # Dependent (waterfall) summary
-        _dep_results = []
-        _df_rem = _fdf.copy()
-        for _col in _condition_cols:
-            _step = _df_rem[~_df_rem[_col].isna()]
+            # Dependent (waterfall) summary
+            _dep_results = []
+            _df_rem = _fdf.copy()
+            for _col in _condition_cols:
+                _step = _df_rem[~_df_rem[_col].isna()]
+                _dep_results.append({
+                    'Step': f'Step {_condition_cols.index(_col) + 1}',
+                    'FilterColumn': _col,
+                    'UniqueKeys': _step['hosp_id_day_key'].nunique(),
+                    'RowCount': _step.shape[0],
+                    'ValueCounts': _step[_col].value_counts(dropna=False).to_dict(),
+                })
+                _df_rem = _df_rem[~_df_rem['hosp_id_day_key'].isin(_step['hosp_id_day_key'])]
             _dep_results.append({
-                'Step': f'Step {_condition_cols.index(_col) + 1}',
-                'FilterColumn': _col,
-                'UniqueKeys': _step['hosp_id_day_key'].nunique(),
-                'RowCount': _step.shape[0],
-                'ValueCounts': _step[_col].value_counts(dropna=False).to_dict(),
+                'Step': 'Step 7 (Unmatched)',
+                'FilterColumn': None,
+                'UniqueKeys': _df_rem['hosp_id_day_key'].nunique(),
+                'RowCount': _df_rem.shape[0],
+                'ValueCounts': None,
             })
-            _df_rem = _df_rem[~_df_rem['hosp_id_day_key'].isin(_step['hosp_id_day_key'])]
-        _dep_results.append({
-            'Step': 'Step 7 (Unmatched)',
-            'FilterColumn': None,
-            'UniqueKeys': _df_rem['hosp_id_day_key'].nunique(),
-            'RowCount': _df_rem.shape[0],
-            'ValueCounts': None,
-        })
-        _dep_df = pd_arg.DataFrame(_dep_results)
-        _total_dep = _dep_df['UniqueKeys'].sum()
-        _dep_df['% by eligible_days'] = _dep_df['UniqueKeys'].apply(
-            lambda x: round(x / eligible_days_arg * 100, 2)
-        )
-        _dep_df['% of Total'] = _dep_df['UniqueKeys'].apply(
-            lambda x: round(x / _total_dep * 100, 2) if _total_dep != 0 else 0
-        )
-        _out = f'{directory_path_arg}/{prefix}_failure_dependent_summary_{_hosp}.csv'
-        _dep_df.to_csv(_out, index=False)
-        print(f'Saved dependent summary: {_out}')
-        print(_hosp, _dep_df, '\n')
+            _dep_df = pd.DataFrame(_dep_results)
+            _total_dep = _dep_df['UniqueKeys'].sum()
+            _dep_df['% by eligible_days'] = _dep_df['UniqueKeys'].apply(
+                lambda x: round(x / eligible_days_arg * 100, 2)
+            )
+            _dep_df['% of Total'] = _dep_df['UniqueKeys'].apply(
+                lambda x: round(x / _total_dep * 100, 2) if _total_dep != 0 else 0
+            )
+            _out = f'{directory_path_arg}/{prefix}_failure_dependent_summary_{_hosp}.csv'
+            _dep_df.to_csv(_out, index=False)
+            print(f'Saved dependent summary: {_out}')
+            print(_hosp, _dep_df, '\n')
 
-        # Independent (non-exclusive) summary
-        _step_dfs = [_fdf[~_fdf[_col].isna()] for _col in _condition_cols]
-        _matched_keys = set().union(*[s['hosp_id_day_key'] for s in _step_dfs])
-        _unmatched = _fdf[~_fdf['hosp_id_day_key'].isin(_matched_keys)]
-        _failure_counts = {
-            col: _step_dfs[i]['hosp_id_day_key'].nunique()
-            for i, col in enumerate(_condition_cols)
-        }
-        _failure_counts['unmatched'] = _unmatched['hosp_id_day_key'].nunique()
-        _vcounts_map = {
-            col: _step_dfs[i][col].value_counts(dropna=False).to_dict()
-            for i, col in enumerate(_condition_cols)
-        }
-        _vcounts_map['unmatched'] = None
-        _total_ind = sum(_failure_counts.values())
-        _ind_rows = []
-        for _reason, _count in _failure_counts.items():
-            _ind_rows.append({
-                'Failure Reason': _reason,
-                'Count': _count,
-                '% by eligible_days': round(_count / eligible_days_arg * 100, 2),
-                '% of Total (out of total failed cases)': (
-                    round(_count / _total_ind * 100, 2) if _total_ind else 0
-                ),
-                'Value Counts': _vcounts_map[_reason],
-            })
-        _ind_df = (
-            pd_arg.DataFrame(_ind_rows)
-            .sort_values(by='Count', ascending=False)
-            .reset_index(drop=True)
-        )
-        _ind_out = f'{directory_path_arg}/{prefix}_failure_independent_summary_hospital_{_hosp}.csv'
-        _ind_df.to_csv(_ind_out, index=False)
-        print(f'Saved independent summary: {_ind_out}')
-        print(_hosp, _ind_df, '\n')
+            # Independent (non-exclusive) summary
+            _step_dfs = [_fdf[~_fdf[_col].isna()] for _col in _condition_cols]
+            _matched_keys = set().union(*[s['hosp_id_day_key'] for s in _step_dfs])
+            _unmatched = _fdf[~_fdf['hosp_id_day_key'].isin(_matched_keys)]
+            _failure_counts = {
+                col: _step_dfs[i]['hosp_id_day_key'].nunique()
+                for i, col in enumerate(_condition_cols)
+            }
+            _failure_counts['unmatched'] = _unmatched['hosp_id_day_key'].nunique()
+            _vcounts_map = {
+                col: _step_dfs[i][col].value_counts(dropna=False).to_dict()
+                for i, col in enumerate(_condition_cols)
+            }
+            _vcounts_map['unmatched'] = None
+            _total_ind = sum(_failure_counts.values())
+            _ind_rows = []
+            for _reason, _count in _failure_counts.items():
+                _ind_rows.append({
+                    'Failure Reason': _reason,
+                    'Count': _count,
+                    '% by eligible_days': round(_count / eligible_days_arg * 100, 2),
+                    '% of Total (out of total failed cases)': (
+                        round(_count / _total_ind * 100, 2) if _total_ind else 0
+                    ),
+                    'Value Counts': _vcounts_map[_reason],
+                })
+            _ind_df = (
+                pd.DataFrame(_ind_rows)
+                .sort_values(by='Count', ascending=False)
+                .reset_index(drop=True)
+            )
+            _ind_out = f'{directory_path_arg}/{prefix}_failure_independent_summary_hospital_{_hosp}.csv'
+            _ind_df.to_csv(_ind_out, index=False)
+            print(f'Saved independent summary: {_ind_out}')
+            print(_hosp, _ind_df, '\n')
+
+    return (_build_failure_summary,)
 
 
 @app.cell
-def _(directory_path, eligible_days, final_df_3, mat_df, pd):
+def _(_build_failure_summary, directory_path, eligible_days, final_df_4, mat_df):
     _build_failure_summary(
-        final_df_3, mat_df, eligible_days,
+        final_df_4, mat_df, eligible_days,
         reference_col='sbt_delivery_pass_fail',
         directory_path_arg=directory_path,
-        pd_arg=pd,
         prefix='EHR_VS_SBT',
     )
     return
 
 
 @app.cell
-def _(directory_path, eligible_days, final_df_3, mat_df, pd):
+def _(_build_failure_summary, directory_path, eligible_days, final_df_4, mat_df):
     _build_failure_summary(
-        final_df_3, mat_df, eligible_days,
+        final_df_4, mat_df, eligible_days,
         reference_col='extubated',
         directory_path_arg=directory_path,
-        pd_arg=pd,
         prefix='EHR_VS_EXTUBATED',
     )
     return
@@ -901,11 +817,11 @@ def _(directory_path, eligible_days, final_df_3, mat_df, pd):
 # Cell 15 — Time-of-day distribution plots
 # ---------------------------------------------------------------------------
 @app.cell
-def _(directory_path, final_df_3, pl, plt):
-    _hospital_ids = final_df_3['hospital_id'].dropna().unique()
+def _(directory_path, final_df_4, pl, plt):
+    _hospital_ids = final_df_4['hospital_id'].dropna().unique()
     _summary_list = []
     for _hosp in _hospital_ids:
-        _fh = final_df_3[final_df_3['hospital_id'] == _hosp]
+        _fh = final_df_4[final_df_4['hospital_id'] == _hosp]
         _sbt_d_time = (
             _fh[(_fh['sbt_delivery_pass_fail'] == 1) & (_fh['eligible_day'] == 1)]
             .sort_values(['hosp_id_day_key', 'event_time'])
@@ -961,11 +877,11 @@ def _(directory_path, final_df_3, pl, plt):
 
 
 @app.cell
-def _(directory_path, final_df_3, pl, plt):
-    _hospital_ids = final_df_3['hospital_id'].dropna().unique()
+def _(directory_path, final_df_4, pl, plt):
+    _hospital_ids = final_df_4['hospital_id'].dropna().unique()
     _summary_list = []
     for _hosp in _hospital_ids:
-        _fh = final_df_3[final_df_3['hospital_id'] == _hosp]
+        _fh = final_df_4[final_df_4['hospital_id'] == _hosp]
         _ext_d_time = (
             _fh[(_fh['extubated'] == 1) & (_fh['eligible_day'] == 1)]
             .sort_values(['hosp_id_day_key', 'event_time'])
@@ -1026,8 +942,8 @@ def _(directory_path, final_df_3, pl, plt):
 # Cell 16 — Final summary stats
 # ---------------------------------------------------------------------------
 @app.cell
-def _(directory_path, final_df_3, mat_df, pl):
-    _fpl = pl.from_pandas(final_df_3[
+def _(directory_path, final_df_4, mat_df, pl):
+    _fpl = pl.from_pandas(final_df_4[
         ['hosp_id_day_key', 'hospitalization_id', 'eligible_day',
          'vent_day_without_paralytics', 'vent_day', 'device_category',
          'location_category']
@@ -1135,6 +1051,7 @@ def _(directory_path, final_df_3, mat_df, pl):
 
 # ---------------------------------------------------------------------------
 # Cell 17 — Table 1 generation
+#   FIX: work on a copy (t1_prep) to avoid mutating t1_cohort across cells.
 # ---------------------------------------------------------------------------
 @app.cell
 def _(np, pd, re, t1_cohort):
@@ -1182,14 +1099,15 @@ def _(np, pd, re, t1_cohort):
         'propofol', 'vasopressin', 'angiotensin',
     ]
     # Zero-dose entries are not "documented" as administered
-    t1_cohort[_drugs] = t1_cohort[_drugs].applymap(
+    t1_prep = t1_cohort.copy()
+    t1_prep[_drugs] = t1_prep[_drugs].applymap(
         lambda x: x if (pd.notna(x) and x > 0) else np.nan
     )
-    t1_cohort['bmi'] = t1_cohort['weight_kg'] / (t1_cohort['height_cm'] / 100) ** 2
-    t1_cohort['language_name'] = t1_cohort['language_name'].apply(categorize_language)
-    t1_cohort[continuous_cols] = t1_cohort[continuous_cols].astype(float)
+    t1_prep['bmi'] = t1_prep['weight_kg'] / (t1_prep['height_cm'] / 100) ** 2
+    t1_prep['language_name'] = t1_prep['language_name'].apply(categorize_language)
+    t1_prep[continuous_cols] = t1_prep[continuous_cols].astype(float)
 
-    return age_bucket, continuous_cols, demographic_columns, documented, medication_columns
+    return age_bucket, continuous_cols, demographic_columns, documented, medication_columns, t1_prep
 
 
 # --- Table 1: categorical by hospitalization_id / patient_id ---
@@ -1201,10 +1119,10 @@ def _(
     documented,
     medication_columns,
     sbt,
-    t1_cohort,
+    t1_prep,
 ):
     for _x in ['hospitalization_id', 'patient_id']:
-        _t1_summary = t1_cohort.groupby(_x).agg(
+        _t1_summary = t1_prep.groupby(_x).agg(
             age_at_admission=('age_at_admission', 'mean'),
             **{col: (col, documented) for col in medication_columns},
             **{col: (col, 'first') for col in demographic_columns},
@@ -1225,14 +1143,14 @@ def _(
 
 # --- Table 1: continuous by hospitalization_id / patient_id ---
 @app.cell
-def _(continuous_cols, directory_path, sbt, t1_cohort):
+def _(continuous_cols, directory_path, sbt, t1_prep):
     _hosp_agg = (
-        t1_cohort.groupby('hospitalization_id')
+        t1_prep.groupby('hospitalization_id')
         .agg({c: 'median' for c in continuous_cols})
         .reset_index()
     )
     _patient_agg = (
-        t1_cohort.groupby('patient_id')
+        t1_prep.groupby('patient_id')
         .agg({c: 'median' for c in continuous_cols})
         .reset_index()
     )
@@ -1252,10 +1170,10 @@ def _(
     demographic_columns,
     directory_path,
     documented,
-    final_df_3,
+    final_df_4,
     medication_columns,
     sbt,
-    t1_cohort,
+    t1_prep,
     tqdm,
 ):
     for _x in tqdm(
@@ -1263,8 +1181,8 @@ def _(
          'EHR_Delivery_2mins', 'EHR_Delivery_30mins'],
         desc='Table 1 categorical (day strata)',
     ):
-        _ids = final_df_3[final_df_3[_x] == 1]['hosp_id_day_key'].unique()
-        _sub = t1_cohort[t1_cohort['hosp_id_day_key'].isin(_ids)]
+        _ids = final_df_4[final_df_4[_x] == 1]['hosp_id_day_key'].unique()
+        _sub = t1_prep[t1_prep['hosp_id_day_key'].isin(_ids)]
         _t1_summary = _sub.groupby('hosp_id_day_key').agg(
             age_at_admission=('age_at_admission', 'mean'),
             **{col: (col, documented) for col in medication_columns},
@@ -1281,14 +1199,14 @@ def _(
 
 # --- Table 1: continuous by flag/day strata ---
 @app.cell
-def _(continuous_cols, directory_path, final_df_3, sbt, t1_cohort, tqdm):
+def _(continuous_cols, directory_path, final_df_4, sbt, t1_prep, tqdm):
     for _x in tqdm(
         ['vent_day', 'vent_day_without_paralytics', 'eligible_day',
          'EHR_Delivery_2mins', 'EHR_Delivery_30mins'],
         desc='Table 1 continuous (day strata)',
     ):
-        _ids = final_df_3.loc[final_df_3[_x] == 1, 'hosp_id_day_key'].unique()
-        _sub = t1_cohort[t1_cohort['hosp_id_day_key'].isin(_ids)]
+        _ids = final_df_4.loc[final_df_4[_x] == 1, 'hosp_id_day_key'].unique()
+        _sub = t1_prep[t1_prep['hosp_id_day_key'].isin(_ids)]
         _day_agg = (
             _sub.groupby('hosp_id_day_key')
             .agg({c: 'median' for c in continuous_cols})
@@ -1369,7 +1287,7 @@ def _(
 def _(
     continuous_cols_sofa,
     directory_path,
-    final_df_3,
+    final_df_4,
     mapping_ids,
     pc,
     pd,
@@ -1383,7 +1301,7 @@ def _(
         desc='Generating SOFA Table 1 per flag',
     ):
         _day_df = (
-            final_df_3[final_df_3[_x] == 1]
+            final_df_4[final_df_4[_x] == 1]
             [['hospitalization_id', 'hosp_id_day_key', 'current_day']]
             .drop_duplicates()
         )

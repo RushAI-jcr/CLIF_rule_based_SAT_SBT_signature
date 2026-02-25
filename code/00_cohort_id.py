@@ -220,7 +220,7 @@ def _(rst, tqdm):
     rst_ef["device_segment_id"] = rst_ef.groupby("hospitalization_id")["_device_change"].cumsum()
     rst_ef["mode_category"] = rst_ef.groupby(["hospitalization_id", "device_segment_id"])["mode_category"].ffill()
     rst_ef["Device_IMV"] = (rst_ef["device_category"] == "imv").astype(int)
-    rst_ef.drop(columns=["_device_change"], inplace=True)
+    rst_ef = rst_ef.drop(columns=["_device_change"])
 
     # ---- Sequential extubation flag loop -----------------------------------
     import numpy as _np
@@ -436,11 +436,10 @@ def _(hospitalization_to_block, np, outlier_cfg, pc, required_id):
 
 
 # ---------------------------------------------------------------------------
-# Cell 10: Med unit conversion — forward-fill weight, convert to standard units,
-#          apply outlier thresholds to doses
+# Cell 10a: Forward-fill weight, compute weight-based dose
 # ---------------------------------------------------------------------------
 @app.cell
-def _(mac, np, outlier_cfg, pd, tqdm, vit_weight):
+def _(mac, pd, vit_weight):
     # ---- Forward-fill patient weight into mac rows -------------------------
     _weight_for_mac = vit_weight.rename(
         columns={"vital_category": "med_category", "recorded_dttm_min": "admin_dttm"}
@@ -451,9 +450,17 @@ def _(mac, np, outlier_cfg, pd, tqdm, vit_weight):
     )
     _mac_with_weight["vital_value"] = _mac_with_weight.groupby("hospitalization_id")["vital_value"].ffill().bfill()
     _mac_no_weight = _mac_with_weight[_mac_with_weight["med_category"] != "weight_kg"].reset_index(drop=True)
-    _mac_pos_weight = _mac_no_weight[_mac_no_weight["vital_value"] > 0].reset_index(drop=True)
+    mac_pos_weight = _mac_no_weight[_mac_no_weight["vital_value"] > 0].reset_index(drop=True)
 
-    # ---- Unit conversion ---------------------------------------------------
+    print(f"mac_pos_weight rows: {len(mac_pos_weight):,}")
+    return (mac_pos_weight,)
+
+
+# ---------------------------------------------------------------------------
+# Cell 10b: Unit conversion function + outlier filtering + QC summary
+# ---------------------------------------------------------------------------
+@app.cell
+def _(mac_pos_weight, np, outlier_cfg, pd, tqdm):
     _MED_UNIT_INFO = {
         "norepinephrine": {"required_unit": "mcg/kg/min", "acceptable_units": ["mcg/kg/min", "mcg/kg/hr", "mg/kg/hr", "mcg/min", "mg/hr"]},
         "epinephrine":    {"required_unit": "mcg/kg/min", "acceptable_units": ["mcg/kg/min", "mcg/kg/hr", "mg/kg/hr", "mcg/min", "mg/hr"]},
@@ -482,17 +489,14 @@ def _(mac, np, outlier_cfg, pd, tqdm, vit_weight):
             return row
         weight = row["vital_value"]
         factor = 1.0
-        # Weight normalization
         if "kg" in cur_unit and "kg" not in req_unit:
             factor *= weight
         elif "kg" not in cur_unit and "kg" in req_unit:
             factor /= weight
-        # Time normalization
         if "hr" in cur_unit and "min" in req_unit:
             factor /= 60.0
         elif "min" in cur_unit and "hr" in req_unit:
             factor *= 60.0
-        # Mass unit conversion
         _cur_mass = cur_unit.split("/")[0]
         _req_mass = req_unit.split("/")[0]
         if _cur_mass != _req_mass:
@@ -505,7 +509,7 @@ def _(mac, np, outlier_cfg, pd, tqdm, vit_weight):
         return row
 
     tqdm.pandas(desc="Converting medication doses")
-    _mac_converted = _mac_pos_weight.progress_apply(_convert_med_dose, axis=1)
+    _mac_converted = mac_pos_weight.progress_apply(_convert_med_dose, axis=1)
 
     # Apply outlier thresholds to converted doses
     if outlier_cfg:
@@ -540,12 +544,10 @@ def _(mac, np, outlier_cfg, pd, tqdm, vit_weight):
 
 
 # ---------------------------------------------------------------------------
-# Cell 11: Build wide cohort — union all event timestamps with polars,
-#          then join rst, adt, mac pivot, pat_at pivot, vitals pivot
+# Cell 11a: Build time spine from unique event times per hospitalization
 # ---------------------------------------------------------------------------
 @app.cell
-def _(adt_cohort, base, mac_final, pat_at, pc, pd, pl, rst_cohort, vit):
-    # ---- Build combo_id key helper -----------------------------------------
+def _(adt_cohort, base, mac_final, pat_at, pl, rst_cohort, vit):
     def _make_combo(df_pl: pl.DataFrame, id_col: str, time_col: str) -> pl.DataFrame:
         return (
             df_pl
@@ -562,7 +564,6 @@ def _(adt_cohort, base, mac_final, pat_at, pc, pd, pl, rst_cohort, vit):
             )
         )
 
-    # ---- Convert each source to polars and collect unique event times ------
     _base_pl  = pl.from_pandas(base)
     _rst_pl   = pl.from_pandas(rst_cohort)
     _adt_pl   = pl.from_pandas(adt_cohort)
@@ -578,8 +579,7 @@ def _(adt_cohort, base, mac_final, pat_at, pc, pd, pl, rst_cohort, vit):
         _make_combo(_vit_pl,  "hospitalization_id", "recorded_dttm_min"),
     ]).unique(subset=["hospitalization_id", "event_time"])
 
-    # ---- Build base × event_time spine ------------------------------------
-    _spine = (
+    spine = (
         _base_pl
         .join(
             _uni_times.select(["hospitalization_id", "event_time"]),
@@ -595,8 +595,16 @@ def _(adt_cohort, base, mac_final, pat_at, pc, pd, pl, rst_cohort, vit):
         )
     )
 
-    # ---- Pivot patient assessments -----------------------------------------
-    _pat_wide_pl = (
+    print(f"spine rows: {spine.shape[0]:,}  |  polars sources ready")
+    return _adt_pl, _mac_pl, _pat_pl, _rst_pl, _vit_pl, spine
+
+
+# ---------------------------------------------------------------------------
+# Cell 11b: Pivot assessments into wide format
+# ---------------------------------------------------------------------------
+@app.cell
+def _(_pat_pl, pl):
+    pat_wide_pl = (
         _pat_pl
         .filter(pl.col("recorded_dttm").is_not_null())
         .with_columns(
@@ -612,9 +620,16 @@ def _(adt_cohort, base, mac_final, pat_at, pc, pd, pl, rst_cohort, vit):
             aggregate_function="first",
         )
     )
+    print(f"pat_wide_pl columns: {pat_wide_pl.columns}")
+    return (pat_wide_pl,)
 
-    # ---- Pivot medications -------------------------------------------------
-    _mac_wide_pl = (
+
+# ---------------------------------------------------------------------------
+# Cell 11c: Pivot medications into wide format
+# ---------------------------------------------------------------------------
+@app.cell
+def _(_mac_pl, pl):
+    mac_wide_pl = (
         _mac_pl
         .filter(pl.col("admin_dttm").is_not_null())
         .with_columns(
@@ -630,9 +645,16 @@ def _(adt_cohort, base, mac_final, pat_at, pc, pd, pl, rst_cohort, vit):
             aggregate_function="min",
         )
     )
+    print(f"mac_wide_pl columns: {mac_wide_pl.columns}")
+    return (mac_wide_pl,)
 
-    # ---- Pivot vitals -------------------------------------------------------
-    _vit_wide_pl = (
+
+# ---------------------------------------------------------------------------
+# Cell 11d: Pivot vitals into wide format
+# ---------------------------------------------------------------------------
+@app.cell
+def _(_vit_pl, pl):
+    vit_wide_pl = (
         _vit_pl
         .filter(pl.col("recorded_dttm_min").is_not_null())
         .with_columns(
@@ -648,8 +670,15 @@ def _(adt_cohort, base, mac_final, pat_at, pc, pd, pl, rst_cohort, vit):
             aggregate_function="first",
         )
     )
+    print(f"vit_wide_pl columns: {vit_wide_pl.columns}")
+    return (vit_wide_pl,)
 
-    # ---- RST with combo_id -------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Cell 11e: Join all pivots onto spine, add demographics
+# ---------------------------------------------------------------------------
+@app.cell
+def _(_adt_pl, _rst_pl, mac_wide_pl, pat_wide_pl, pc, pd, pl, spine, vit_wide_pl):
     _rst_wide_pl = (
         _rst_pl
         .filter(pl.col("recorded_dttm").is_not_null())
@@ -661,7 +690,6 @@ def _(adt_cohort, base, mac_final, pat_at, pc, pd, pl, rst_cohort, vit):
         )
     )
 
-    # ---- ADT with combo_id -------------------------------------------------
     _adt_wide_pl = (
         _adt_pl
         .filter(pl.col("in_dttm").is_not_null())
@@ -673,28 +701,24 @@ def _(adt_cohort, base, mac_final, pat_at, pc, pd, pl, rst_cohort, vit):
         )
     )
 
-    # ---- Join everything onto the spine ------------------------------------
-    # Drop duplicate join keys from right-hand tables before each join
     def _drop_dupe_cols(df: pl.DataFrame, existing_cols: list[str], keep: list[str]) -> pl.DataFrame:
         drop = [c for c in df.columns if c in existing_cols and c not in keep]
         return df.drop(drop)
 
-    _spine_cols = _spine.columns
-
+    _spine_cols = spine.columns
     _rst_join = _drop_dupe_cols(_rst_wide_pl, _spine_cols, ["combo_id"])
     _adt_join = _drop_dupe_cols(_adt_wide_pl, _spine_cols, ["combo_id"])
 
     _joined = (
-        _spine
+        spine
         .join(_adt_join, on="combo_id", how="left", suffix="_adt")
         .join(_rst_join, on="combo_id", how="left", suffix="_rst")
-        .join(_mac_wide_pl, on="combo_id", how="left", suffix="_mac")
-        .join(_pat_wide_pl, on="combo_id", how="left", suffix="_pat")
-        .join(_vit_wide_pl, on="combo_id", how="left", suffix="_vit")
+        .join(mac_wide_pl, on="combo_id", how="left", suffix="_mac")
+        .join(pat_wide_pl, on="combo_id", how="left", suffix="_pat")
+        .join(vit_wide_pl, on="combo_id", how="left", suffix="_vit")
         .unique()
     )
 
-    # Convert back to pandas for remaining pandas-dependent steps
     wide_df = _joined.to_pandas()
     wide_df["event_time"] = pd.to_datetime(wide_df["event_time"])
     pc.deftime(wide_df["event_time"])

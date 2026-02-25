@@ -64,8 +64,7 @@ def _():
 
 
 # ---------------------------------------------------------------------------
-# Cell 3: Load cohort + prep — read parquet with polars, convert flags,
-#          add sedation dose columns. All mutations consolidated here.
+# Cell 3a: Load cohort + datetime parsing
 # ---------------------------------------------------------------------------
 @app.cell
 def _(np, os, pc, pd, pl):
@@ -88,21 +87,31 @@ def _(np, os, pc, pd, pl):
     t1_cohort = _raw.to_pandas()
 
     # --- work in pandas from here (downstream functions require it) ---
-    cohort = t1_cohort.copy()
+    cohort_raw = t1_cohort.copy()
 
     # Convert pass_fail columns to binary documentation indicators.
     # 1 = documented (pass), 0 = documented (fail), NaN = not documented.
-    cohort['sat_delivery_pass_fail_documented'] = (
-        cohort['sat_delivery_pass_fail'].notna().astype(float).replace(0.0, np.nan)
+    cohort_raw['sat_delivery_pass_fail_documented'] = (
+        cohort_raw['sat_delivery_pass_fail'].notna().astype(float).replace(0.0, np.nan)
     )
-    cohort['sat_screen_pass_fail_documented'] = (
-        cohort['sat_screen_pass_fail'].notna().astype(float).replace(0.0, np.nan)
+    cohort_raw['sat_screen_pass_fail_documented'] = (
+        cohort_raw['sat_screen_pass_fail'].notna().astype(float).replace(0.0, np.nan)
     )
 
     # --- datetime parsing ---
-    cohort['event_time'] = pd.to_datetime(cohort['event_time'])
-    cohort['admission_dttm'] = pd.to_datetime(cohort['admission_dttm'], format='mixed')
-    cohort['discharge_dttm'] = pd.to_datetime(cohort['discharge_dttm'], format='mixed')
+    cohort_raw['event_time'] = pd.to_datetime(cohort_raw['event_time'])
+    cohort_raw['admission_dttm'] = pd.to_datetime(cohort_raw['admission_dttm'], format='mixed')
+    cohort_raw['discharge_dttm'] = pd.to_datetime(cohort_raw['discharge_dttm'], format='mixed')
+
+    return MAX_FFILL_OBSERVATIONS, cohort_raw, output_dir, t1_cohort
+
+
+# ---------------------------------------------------------------------------
+# Cell 3b: Forward-fill + derived columns (sedation, paralytics, RASS)
+# ---------------------------------------------------------------------------
+@app.cell
+def _(MAX_FFILL_OBSERVATIONS, cohort_raw, np, pd):
+    cohort = cohort_raw.copy()
 
     # --- sort + forward-fill device/location ---
     cohort = cohort.sort_values(
@@ -160,15 +169,14 @@ def _(np, os, pc, pd, pl):
         by=['hospitalization_id', 'event_time']
     ).reset_index(drop=True)
 
-    return MAX_FFILL_OBSERVATIONS, cohort, output_dir, t1_cohort
+    return (cohort,)
 
 
 # ---------------------------------------------------------------------------
-# Cell 4: SAT eligibility — process_cohort() + call
-#          Returns (result_df, cohort_with_eligibility)
+# Cell 4a: Define process_cohort() function
 # ---------------------------------------------------------------------------
 @app.cell
-def _(cohort, np, pd, tqdm):
+def _(pd, tqdm):
 
     def process_cohort(df: pd.DataFrame) -> pd.DataFrame:
         """Identify encounter-days where conditions for SAT eligibility are met
@@ -253,6 +261,14 @@ def _(cohort, np, pd, tqdm):
 
         return pd.DataFrame(result)
 
+    return (process_cohort,)
+
+
+# ---------------------------------------------------------------------------
+# Cell 4b: Call process_cohort() + merge eligibility
+# ---------------------------------------------------------------------------
+@app.cell
+def _(cohort, np, pd, process_cohort):
     result_df = process_cohort(cohort)
     print(
         'Encounter days with at least 4 hours of conditions met from 10 PM to 6 AM:',
@@ -260,41 +276,41 @@ def _(cohort, np, pd, tqdm):
     )
 
     # --- merge eligibility back into cohort ---
-    cohort_work = cohort.copy()
-    cohort_work['event_time'] = pd.to_datetime(cohort_work['event_time'])
-    cohort_work['event_date'] = (
-        cohort_work['event_time'] - pd.Timedelta(hours=6)
+    _cohort_work = cohort.copy()
+    _cohort_work['event_time'] = pd.to_datetime(_cohort_work['event_time'])
+    _cohort_work['event_date'] = (
+        _cohort_work['event_time'] - pd.Timedelta(hours=6)
     ).dt.normalize()
 
-    cohort_elig = cohort_work.merge(
+    _cohort_elig = _cohort_work.merge(
         result_df[['hospitalization_id', 'current_day_key', 'event_time_at_4_hours']],
         how='left',
         left_on=['hospitalization_id', 'event_date'],
         right_on=['hospitalization_id', 'current_day_key'],
     )
 
-    mask_valid = cohort_elig['event_time_at_4_hours'].notna()
-    mask_after = cohort_elig['event_time'] >= cohort_elig['event_time_at_4_hours']
-    eligible_rows = cohort_elig[mask_valid & mask_after].copy()
-    first_eligible_idx = (
-        eligible_rows.groupby(['hospitalization_id', 'event_date'])['event_time']
+    _mask_valid = _cohort_elig['event_time_at_4_hours'].notna()
+    _mask_after = _cohort_elig['event_time'] >= _cohort_elig['event_time_at_4_hours']
+    _eligible_rows = _cohort_elig[_mask_valid & _mask_after].copy()
+    _first_eligible_idx = (
+        _eligible_rows.groupby(['hospitalization_id', 'event_date'])['event_time']
         .idxmin()
     )
 
-    cohort_elig['eligible_event'] = np.nan
-    cohort_elig.loc[first_eligible_idx, 'eligible_event'] = 1
+    _cohort_elig['eligible_event'] = np.nan
+    _cohort_elig.loc[_first_eligible_idx, 'eligible_event'] = 1
 
     # Remove flag on the last event per hospitalization to avoid edge artefacts
-    last_idxs = cohort_elig.groupby('hospitalization_id')['event_time'].idxmax()
-    cohort_elig.loc[last_idxs, 'eligible_event'] = np.nan
+    _last_idxs = _cohort_elig.groupby('hospitalization_id')['event_time'].idxmax()
+    _cohort_elig.loc[_last_idxs, 'eligible_event'] = np.nan
 
-    eligible_days = cohort_elig.loc[
-        cohort_elig['eligible_event'] == 1, 'hosp_id_day_key'
+    _eligible_days = _cohort_elig.loc[
+        _cohort_elig['eligible_event'] == 1, 'hosp_id_day_key'
     ].unique()
-    cohort_elig['on_vent_and_sedation'] = (
-        cohort_elig['hosp_id_day_key'].isin(eligible_days).astype(int)
+    _cohort_elig['on_vent_and_sedation'] = (
+        _cohort_elig['hosp_id_day_key'].isin(_eligible_days).astype(int)
     )
-    cohort_with_eligibility = cohort_elig.drop(
+    cohort_with_eligibility = _cohort_elig.drop(
         columns=['event_date', 'current_day_key', 'event_time_at_4_hours']
     )
 
@@ -305,12 +321,11 @@ def _(cohort, np, pd, tqdm):
         ].nunique(),
     )
 
-    return cohort_with_eligibility, process_cohort, result_df
+    return cohort_with_eligibility, result_df
 
 
 # ---------------------------------------------------------------------------
-# Cell 5: SAT delivery detection — rank sedation weaning, compute 6 EHR flags
-#          Returns (cohort_with_delivery,)
+# Cell 5a: rank_sedation computation (groupby transform)
 # ---------------------------------------------------------------------------
 @app.cell
 def _(cohort_with_eligibility, np, pd, tqdm):
@@ -362,7 +377,18 @@ def _(cohort_with_eligibility, np, pd, tqdm):
     # Ensure RASS is float
     vent_eligible['rass'] = vent_eligible['rass'].astype(float)
 
-    # --- main SAT flag loop ---
+    sat_med_cols = _MED_COLS
+    sat_med_cols2 = _MED_COLS2
+    sat_flag_cols = _FLAG_COLS
+
+    return sat_flag_cols, sat_med_cols, sat_med_cols2, vent_eligible
+
+
+# ---------------------------------------------------------------------------
+# Cell 5b: Main SAT 6-flag evaluation loop
+# ---------------------------------------------------------------------------
+@app.cell
+def _(np, pd, sat_flag_cols, sat_med_cols, sat_med_cols2, tqdm, vent_eligible):
     _delta30 = pd.Timedelta(minutes=30)
     _delta45 = pd.Timedelta(minutes=45)
 
@@ -401,14 +427,14 @@ def _(cohort_with_eligibility, np, pd, tqdm):
 
             # SAT_EHR_delivery: no meds in next 30 min
             _meds_ok = (
-                _fw30[_MED_COLS].isna() | (_fw30[_MED_COLS] == 0)
+                _fw30[sat_med_cols].isna() | (_fw30[sat_med_cols] == 0)
             ).all().all()
             if _meds_ok:
                 _flags_set['SAT_EHR_delivery'] = 1
 
             # SAT_modified_delivery: no non-opioid meds in next 30 min
             _meds2_ok = (
-                _fw30[_MED_COLS2].isna() | (_fw30[_MED_COLS2] == 0)
+                _fw30[sat_med_cols2].isna() | (_fw30[sat_med_cols2] == 0)
             ).all().all()
             if _meds2_ok:
                 _flags_set['SAT_modified_delivery'] = 1
@@ -425,9 +451,9 @@ def _(cohort_with_eligibility, np, pd, tqdm):
             # SAT_med_halved_rass_pos: all meds <= 50 % of prior 30-min max,
             #   AND last RASS in next 45 min >= 0
             if not _pr30.empty and not _fw30.empty:
-                _half_max = _pr30[_MED_COLS].max() * 0.5
+                _half_max = _pr30[sat_med_cols].max() * 0.5
                 _halved_ok = True
-                for _med in _MED_COLS:
+                for _med in sat_med_cols:
                     _vals = _fw30[_med].dropna()
                     _vals = _vals[_vals != 0]
                     if not _vals.empty and not (_vals <= _half_max[_med]).all():
@@ -449,6 +475,14 @@ def _(cohort_with_eligibility, np, pd, tqdm):
             for _f, _val in _flags_set.items():
                 vent_eligible.at[_idx, _f] = _val
 
+    return ()
+
+
+# ---------------------------------------------------------------------------
+# Cell 5c: Post-processing (RASS patch, hospital_id fill, merge)
+# ---------------------------------------------------------------------------
+@app.cell
+def _(cohort_with_eligibility, vent_eligible):
     # Patch: sites without RASS — zero out RASS-based flags
     if cohort_with_eligibility['rass'].nunique() <= 1:
         for _f in [
@@ -531,11 +565,10 @@ def _(cohort_with_delivery, output_dir, pd, pl):
 
 
 # ---------------------------------------------------------------------------
-# Cell 7: Day-level aggregation — groupby hosp_id_day_key, build final_df
-#          Returns (final_df,)
+# Cell 7a: ICU LOS + demographics
 # ---------------------------------------------------------------------------
 @app.cell
-def _(cohort_with_delivery, cohort_with_eligibility, np, pd, pl):
+def _(cohort_with_delivery, cohort_with_eligibility, pd, pl):
     # --- ICU LOS (polars for speed) ---
     _icu_pl = (
         pl.from_pandas(
@@ -578,13 +611,21 @@ def _(cohort_with_delivery, cohort_with_eligibility, np, pd, pl):
         'age_at_admission', 'discharge_category', 'sex_category',
         'race_category', 'ethnicity_category', 'hosp_id_day_key',
     ]
-    _main = (
+    demo_main = (
         cohort_with_delivery[_demo_cols]
         .drop_duplicates()
     )
-    _main = _main.merge(total_icu_los_per_hosp, on='hospitalization_id', how='left')
-    _main = _main.merge(_last_hosp, on='hospitalization_id', how='left')
+    demo_main = demo_main.merge(total_icu_los_per_hosp, on='hospitalization_id', how='left')
+    demo_main = demo_main.merge(_last_hosp, on='hospitalization_id', how='left')
 
+    return demo_main, total_icu_los_per_hosp
+
+
+# ---------------------------------------------------------------------------
+# Cell 7b: Flag aggregation + merge
+# ---------------------------------------------------------------------------
+@app.cell
+def _(cohort_with_delivery, demo_main, np, pd, pl):
     # --- day-level flag aggregation (polars for groupby performance) ---
     _max_cols = [
         'sat_screen_pass_fail', 'sat_delivery_pass_fail',
@@ -613,7 +654,7 @@ def _(cohort_with_delivery, cohort_with_eligibility, np, pd, pl):
         np.nan,
     )
 
-    final_df = _main.merge(_df_grouped, on='hosp_id_day_key', how='inner')
+    final_df = demo_main.merge(_df_grouped, on='hosp_id_day_key', how='inner')
     final_df['admission_dttm'] = pd.to_datetime(final_df['admission_dttm'], format='mixed')
     final_df['discharge_dttm'] = pd.to_datetime(final_df['discharge_dttm'], format='mixed')
 
@@ -627,21 +668,15 @@ def _(cohort_with_delivery, cohort_with_eligibility, np, pd, pl):
         print(final_df[_x].value_counts())
         print()
 
-    return final_df, total_icu_los_per_hosp
+    return (final_df,)
 
 
 # ---------------------------------------------------------------------------
-# Cell 8: Concordance analysis — confusion matrices, kappa, metrics
+# Cell 8a: Concordance helper functions
 # ---------------------------------------------------------------------------
 @app.cell
-def _(cohort_with_eligibility, confusion_matrix, final_df, np, os, output_dir, pd, plt):
+def _(np, pd):
     from sklearn.metrics import cohen_kappa_score
-    import matplotlib
-    from matplotlib import rcParams
-
-    # Enforce JAMA style
-    rcParams['font.family'] = 'Arial'
-    rcParams['font.size'] = 8
 
     def _landis_koch(kappa: float) -> str:
         """Landis & Koch (1977) interpretation of kappa values."""
@@ -680,6 +715,35 @@ def _(cohort_with_eligibility, confusion_matrix, final_df, np, os, output_dir, p
             float(np.percentile(kappas, (1 - alpha) * 100)),
         )
 
+    landis_koch = _landis_koch
+    kappa_ci_bootstrap = _kappa_ci_bootstrap
+
+    return cohen_kappa_score, kappa_ci_bootstrap, landis_koch
+
+
+# ---------------------------------------------------------------------------
+# Cell 8b: Concordance loop with confusion matrices
+# ---------------------------------------------------------------------------
+@app.cell
+def _(
+    cohen_kappa_score,
+    cohort_with_eligibility,
+    confusion_matrix,
+    final_df,
+    kappa_ci_bootstrap,
+    landis_koch,
+    np,
+    os,
+    output_dir,
+    pd,
+    plt,
+):
+    from matplotlib import rcParams
+
+    # Enforce JAMA style
+    rcParams['font.family'] = 'Arial'
+    rcParams['font.size'] = 8
+
     _con_df = final_df.copy()
     _fill_cols = [
         'SAT_EHR_delivery', 'SAT_modified_delivery', 'sat_flowsheet_delivery_flag',
@@ -716,8 +780,8 @@ def _(cohort_with_eligibility, confusion_matrix, final_df, np, os, output_dir, p
         )
         _specificity = _tn / (_tn + _fp) if _tn + _fp else 0
         _kappa = cohen_kappa_score(_y_true, _y_pred)
-        _kappa_lo, _kappa_hi = _kappa_ci_bootstrap(_y_true, _y_pred)
-        _kappa_interp = _landis_koch(_kappa)
+        _kappa_lo, _kappa_hi = kappa_ci_bootstrap(_y_true, _y_pred)
+        _kappa_interp = landis_koch(_kappa)
 
         # --- JAMA-style confusion matrix plot ---
         _cm_pct = _cm / _total * 100
@@ -917,12 +981,11 @@ def _(cohort_with_delivery, os, output_dir, pd, plt):
 
 
 # ---------------------------------------------------------------------------
-# Cell 11: Table 1 generation — demographics and medications by flag
+# Cell 11a: Table 1 — helper functions + column lists
 # ---------------------------------------------------------------------------
 @app.cell
-def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
+def _(np, pd, re):
 
-    # --- helper functions ---
     def _documented(series: pd.Series) -> str:
         """Return 'Documented' if any value in series is non-null, else 'Not Documented'."""
         return 'Documented' if series.notna().any() else 'Not Documented'
@@ -947,8 +1010,7 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
             return 'Spanish'
         return 'Other'
 
-    # --- column lists ---
-    _medication_columns = [
+    t1_medication_columns = [
         'rass', 'gcs_total',
         'cisatracurium', 'vecuronium', 'rocuronium',
         'dobutamine', 'dopamine', 'epinephrine',
@@ -957,10 +1019,10 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
         'norepinephrine', 'phenylephrine', 'propofol',
         'vasopressin', 'angiotensin',
     ]
-    _demographic_columns = [
+    t1_demographic_columns = [
         'sex_category', 'race_category', 'ethnicity_category', 'language_name',
     ]
-    _continuous_cols = [
+    t1_continuous_cols = [
         'rass', 'gcs_total',
         'cisatracurium', 'vecuronium', 'rocuronium',
         'dobutamine', 'dopamine', 'epinephrine',
@@ -969,7 +1031,7 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
         'norepinephrine', 'phenylephrine', 'propofol',
         'vasopressin', 'angiotensin', 'bmi',
     ]
-    _drugs = [
+    t1_drugs = [
         'cisatracurium', 'vecuronium', 'rocuronium',
         'dobutamine', 'dopamine', 'epinephrine',
         'fentanyl', 'hydromorphone', 'isoproterenol',
@@ -979,8 +1041,40 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
     ]
 
     # --- prepare t1_cohort_prep (no mutation of t1_cohort) ---
+    documented_fn = _documented
+    age_bucket_fn = _age_bucket
+    categorize_language_fn = _categorize_language
+
+    return (
+        age_bucket_fn,
+        categorize_language_fn,
+        documented_fn,
+        t1_continuous_cols,
+        t1_demographic_columns,
+        t1_drugs,
+        t1_medication_columns,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cell 11b: Categorical Table 1 by patient_id and hospitalization_id
+# ---------------------------------------------------------------------------
+@app.cell
+def _(
+    age_bucket_fn,
+    categorize_language_fn,
+    documented_fn,
+    np,
+    output_dir,
+    t1_cohort,
+    t1_continuous_cols,
+    t1_demographic_columns,
+    t1_drugs,
+    t1_medication_columns,
+    t1code,
+):
     t1_cohort_prep = t1_cohort.copy()
-    _drugs_present = [d for d in _drugs if d in t1_cohort_prep.columns]
+    _drugs_present = [d for d in t1_drugs if d in t1_cohort_prep.columns]
     t1_cohort_prep[_drugs_present] = t1_cohort_prep[_drugs_present].apply(
         lambda col: col.map(lambda x: x if x > 0 else np.nan)
     )
@@ -988,28 +1082,20 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
         t1_cohort_prep['weight_kg'] / (t1_cohort_prep['height_cm'] / 100) ** 2
     )
     t1_cohort_prep['language_name'] = (
-        t1_cohort_prep['language_name'].apply(_categorize_language)
+        t1_cohort_prep['language_name'].apply(categorize_language_fn)
         if 'language_name' in t1_cohort_prep.columns
         else 'Other'
     )
-    _cont_present = [c for c in _continuous_cols if c in t1_cohort_prep.columns]
+    _cont_present = [c for c in t1_continuous_cols if c in t1_cohort_prep.columns]
     t1_cohort_prep[_cont_present] = t1_cohort_prep[_cont_present].astype(float)
 
     # --- Table 1: pySBT categorical by hospitalization_id and patient_id ---
     for _grp_col in ['hospitalization_id', 'patient_id']:
-        _t1_summ = t1_cohort_prep.groupby(_grp_col).agg(
-            age_at_admission=('age_at_admission', 'mean'),
-            **{c: (_c := c, _documented)[1] for c in _medication_columns
-               if c in t1_cohort_prep.columns},
-            **{c: (c, 'first')[1] for c in _demographic_columns
-               if c in t1_cohort_prep.columns},
-        ).reset_index()
-        # Rebuild with explicit agg to avoid comprehension lambda scoping issues
         _agg_dict: dict = {'age_at_admission': 'mean'}
-        for _mc in _medication_columns:
+        for _mc in t1_medication_columns:
             if _mc in t1_cohort_prep.columns:
-                _agg_dict[_mc] = _documented
-        for _dc in _demographic_columns:
+                _agg_dict[_mc] = documented_fn
+        for _dc in t1_demographic_columns:
             if _dc in t1_cohort_prep.columns:
                 _agg_dict[_dc] = 'first'
         _t1_summ = (
@@ -1017,10 +1103,10 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
             .agg(_agg_dict)
             .reset_index()
         )
-        _t1_summ['age_bucket'] = _t1_summ['age_at_admission'].apply(_age_bucket)
+        _t1_summ['age_bucket'] = _t1_summ['age_at_admission'].apply(age_bucket_fn)
         _t1_summ = _t1_summ.drop(columns=['age_at_admission'])
         _cat_cols_present = [
-            c for c in _medication_columns + _demographic_columns + ['age_bucket']
+            c for c in t1_medication_columns + t1_demographic_columns + ['age_bucket']
             if c in _t1_summ.columns
         ]
         _summary_df = t1code.manual_categorical_tableone(_t1_summ, _cat_cols_present)
@@ -1031,21 +1117,46 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
         )
         _summary_df.to_csv(f'{output_dir}/{_fname}', index=False)
 
-    # --- Table 1: pySBT continuous ---
+    t1_cont_present = _cont_present
+
+    return t1_cohort_prep, t1_cont_present
+
+
+# ---------------------------------------------------------------------------
+# Cell 11c: Continuous Table 1 by patient_id and hospitalization_id
+# ---------------------------------------------------------------------------
+@app.cell
+def _(output_dir, t1_cohort_prep, t1_cont_present, t1code):
     _hosp_agg = t1_cohort_prep.groupby('hospitalization_id').agg(
-        {c: 'median' for c in _cont_present}
+        {c: 'median' for c in t1_cont_present}
     ).reset_index()
     _pat_agg = t1_cohort_prep.groupby('patient_id').agg(
-        {c: 'median' for c in _cont_present}
+        {c: 'median' for c in t1_cont_present}
     ).reset_index()
-    t1code.manual_tableone(_hosp_agg, _cont_present).to_csv(
+    t1code.manual_tableone(_hosp_agg, t1_cont_present).to_csv(
         f'{output_dir}/table1_hospitalization_id_continuous.csv', index=False
     )
-    t1code.manual_tableone(_pat_agg, _cont_present).to_csv(
+    t1code.manual_tableone(_pat_agg, t1_cont_present).to_csv(
         f'{output_dir}/table1_patient_id_continuous.csv', index=False
     )
+    return
 
-    # --- Table 1: per flag (categorical) ---
+
+# ---------------------------------------------------------------------------
+# Cell 11d: Per-flag categorical tables
+# ---------------------------------------------------------------------------
+@app.cell
+def _(
+    age_bucket_fn,
+    documented_fn,
+    final_df,
+    output_dir,
+    t1_cohort_prep,
+    t1_demographic_columns,
+    t1_medication_columns,
+    t1code,
+    tqdm,
+):
     for _flag in tqdm(
         ['eligible_event', 'SAT_EHR_delivery', 'SAT_modified_delivery'],
         desc='Generating categorical Table 1 for each flag',
@@ -1053,23 +1164,40 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
         _ids = final_df[final_df[_flag] == 1]['hosp_id_day_key'].unique()
         _sub = t1_cohort_prep[t1_cohort_prep['hosp_id_day_key'].isin(_ids)]
         _agg2: dict = {'age_at_admission': 'mean'}
-        for _mc in _medication_columns:
+        for _mc in t1_medication_columns:
             if _mc in _sub.columns:
-                _agg2[_mc] = _documented
-        for _dc in _demographic_columns:
+                _agg2[_mc] = documented_fn
+        for _dc in t1_demographic_columns:
             if _dc in _sub.columns:
                 _agg2[_dc] = 'first'
         _t1f = _sub.groupby('hosp_id_day_key').agg(_agg2).reset_index()
-        _t1f['age_bucket'] = _t1f['age_at_admission'].apply(_age_bucket)
+        _t1f['age_bucket'] = _t1f['age_at_admission'].apply(age_bucket_fn)
         _t1f = _t1f.drop(columns=['age_at_admission'])
         _cat_f = [
-            c for c in _medication_columns + _demographic_columns + ['age_bucket']
+            c for c in t1_medication_columns + t1_demographic_columns + ['age_bucket']
             if c in _t1f.columns
         ]
         t1code.manual_categorical_tableone(_t1f, _cat_f).to_csv(
             f'{output_dir}/table1_{_flag}_categorical.csv', index=False
         )
+    return
 
+
+# ---------------------------------------------------------------------------
+# Cell 11e: Per-flag continuous tables + TableOne subsets
+# ---------------------------------------------------------------------------
+@app.cell
+def _(
+    TableOne,
+    final_df,
+    output_dir,
+    pc,
+    pd,
+    t1_cohort_prep,
+    t1_cont_present,
+    t1code,
+    tqdm,
+):
     # --- Table 1: per flag (continuous) ---
     for _flag in tqdm(
         [
@@ -1082,9 +1210,9 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
         _ids = final_df.loc[final_df[_flag] == 1, 'hosp_id_day_key'].unique()
         _sub = t1_cohort_prep[t1_cohort_prep['hosp_id_day_key'].isin(_ids)]
         _day_agg = _sub.groupby('hosp_id_day_key').agg(
-            {c: 'median' for c in _cont_present}
+            {c: 'median' for c in t1_cont_present}
         ).reset_index()
-        t1code.manual_tableone(_day_agg, _cont_present).to_csv(
+        t1code.manual_tableone(_day_agg, t1_cont_present).to_csv(
             f'{output_dir}/table1_{_flag}_continuous.csv', index=False
         )
 
@@ -1138,7 +1266,7 @@ def _(TableOne, final_df, np, output_dir, pc, pd, re, t1_cohort, t1code, tqdm):
         f"{output_dir}/table1_all_{pc.helper['site_name']}.csv",
     )
 
-    return (t1_cohort_prep,)
+    return
 
 
 # ---------------------------------------------------------------------------
