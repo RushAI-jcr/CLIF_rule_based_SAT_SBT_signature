@@ -432,18 +432,21 @@ def compute_sofa(
     resp_new= resp_new[[id_col, 'hospitalization_id', 'recorded_dttm', 'mode_category', 
                         'device_category', 'fio2_combined', 'fio2_set', 'tidal_volume_set', 'peep_set', 'lpm_set']]
     # Define device ranking
-    # Normalize legacy device_category values to CLIF 2.1 vocabulary
+    # NOTE: These are INTERNAL shorthand categories for SOFA scoring only,
+    # NOT official CLIF 2.1 mCIDE device_category values.
+    # Official mCIDE: IMV, NIPPV, CPAP, High Flow NC, Face Mask, Trach Collar,
+    #                 Nasal Cannula, Room Air, Other
     _device_normalize = {
-        'nippv': 'niv',
-        'cpap': 'niv',
-        'high flow nc': 'hfnc',
-        'face mask': 'supplemental_o2',
-        'nasal cannula': 'supplemental_o2',
-        'trach collar': 'tracheostomy',
+        'nippv': 'niv',       # mCIDE: NIPPV → internal: niv
+        'cpap': 'niv',        # mCIDE: CPAP → internal: niv
+        'high flow nc': 'hfnc',           # mCIDE: High Flow NC → internal: hfnc
+        'face mask': 'supplemental_o2',   # mCIDE: Face Mask → internal: supplemental_o2
+        'nasal cannula': 'supplemental_o2',  # mCIDE: Nasal Cannula → internal: supplemental_o2
+        'trach collar': 'tracheostomy',   # mCIDE: Trach Collar → internal: tracheostomy
     }
     resp_new['device_category'] = resp_new['device_category'].replace(_device_normalize)
 
-    # CLIF 2.1 device severity ranking
+    # Internal device severity ranking (for SOFA scoring, not mCIDE)
     device_rank_dict = {
         'imv': 1,
         'niv': 2,

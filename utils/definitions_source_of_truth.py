@@ -52,9 +52,13 @@ SAT_ELIGIBILITY_WINDOW_END_HOUR = 6    # index day
 
 # Continuous sedatives (CLIF med_category values)
 # Dexmedetomidine EXCLUDED per manuscript: "allows for awake status"
+# Ketamine EXCLUDED: dissociative, not a standard sedative-hypnotic for SAT
+# Pentobarbital EXCLUDED: used for refractory ICP, not routine ICU sedation
 SAT_SEDATIVES = ["propofol", "lorazepam", "midazolam"]
 
 # Continuous opioids (CLIF med_category values)
+# Remifentanil EXCLUDED: ultra-short acting, self-clears; rarely used as
+# standing ICU sedation infusion in the study population
 SAT_OPIOIDS = ["fentanyl", "morphine", "hydromorphone"]
 
 # All sedation meds (sedatives + opioids)
@@ -126,8 +130,9 @@ SBT_MIN_STABILITY_HOURS = 2
 # Transition from controlled to support mode >= 2 min
 SBT_PRIMARY_DURATION_MIN = 2
 
-# Support modes (CLIF mode_category values)
-SBT_SUPPORT_MODES = ["pressure support/cpap"]
+# Support modes (CLIF mode_category values, lowercased)
+# mCIDE: Pressure Support/CPAP, Volume Support are support modes
+SBT_SUPPORT_MODES = ["pressure support/cpap", "volume support"]
 # Also T-piece (checked via mode_name)
 
 # Support mode pressure limits
@@ -188,12 +193,17 @@ FLOWSHEET_ASSESSMENT_CATEGORIES = [
     "gcs_total",
 ]
 
-# Vasopressor med_category values (CLIF 2.1 mCIDE)
+# Vasoactive med_category values (CLIF 2.1 mCIDE med_group: vasoactives)
+# Note: isoproterenol is a chronotrope (not a vasopressor) — included in the
+# mCIDE vasoactives group but excluded from vasopressor dosing calculations.
 VASOPRESSORS = [
     "norepinephrine", "epinephrine", "phenylephrine",
     "angiotensin", "vasopressin", "dopamine",
-    "dobutamine", "milrinone", "isoproterenol",
+    "dobutamine", "milrinone",
 ]
+
+# Chronotropes (mCIDE vasoactives but NOT vasopressors)
+CHRONOTROPES = ["isoproterenol"]
 
 # ============================================================
 # SENSITIVITY ANALYSIS PARAMETERS

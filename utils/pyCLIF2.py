@@ -1001,6 +1001,13 @@ def convert_dose(row: pd.Series) -> Union[float, None]:
 
 
 def categorize_device(row):
+    """Infer device_category from respiratory parameters when missing.
+
+    NOTE: Returns INTERNAL shorthand values (room_air, supplemental_o2, hfnc)
+    for imputation when device_category is NaN. These are NOT official mCIDE
+    device_category values. Downstream code should map back to mCIDE vocabulary
+    (Room Air, Face Mask/Nasal Cannula, High Flow NC) if strict compliance is needed.
+    """
     if pd.notna(row['device_category']):
         return row['device_category']
     elif row['mode_category'] in ["simv", "pressure-regulated volume control", "assist control-volume control"]:
