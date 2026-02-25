@@ -91,11 +91,14 @@ SAT_RASS_ALERTNESS_RANGE = (0, 1)  # inclusive
 SBT_ELIGIBILITY_WINDOW_START_HOUR = 22
 SBT_ELIGIBILITY_WINDOW_END_HOUR = 6
 
-# Controlled modes of ventilation (CLIF mode_category values)
+# Controlled modes of ventilation (CLIF mode_category values, lowercased)
+# Per mCIDE: Assist Control-Volume Control, Pressure Control,
+# Pressure-Regulated Volume Control, SIMV are all controlled modes.
 SBT_CONTROLLED_MODES = [
     "assist control-volume control",
     "pressure control",
     "pressure-regulated volume control",
+    "simv",
 ]
 
 # Minimum hours on controlled mode for SBT eligibility
@@ -180,7 +183,7 @@ FLOWSHEET_ASSESSMENT_CATEGORIES = [
     "sat_delivery_pass_fail",
     "sbt_screen_pass_fail",
     "sbt_delivery_pass_fail",
-    "sbt_failure_reason",
+    "sbt_fail_reason",  # mCIDE: sbt_fail_reason (not sbt_failure_reason)
     "rass",
     "gcs_total",
 ]
