@@ -189,7 +189,7 @@ FLOWSHEET_ASSESSMENT_CATEGORIES = [
     "sbt_screen_pass_fail",
     "sbt_delivery_pass_fail",
     "sbt_fail_reason",  # mCIDE: sbt_fail_reason (not sbt_failure_reason)
-    "rass",
+    "RASS",  # mCIDE uses uppercase RASS
     "gcs_total",
 ]
 

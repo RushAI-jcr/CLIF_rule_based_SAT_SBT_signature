@@ -72,8 +72,10 @@ def _build_hosp_dataset(day_level_df: pd.DataFrame, exposure_col: str) -> pd.Dat
 
     if "died" not in hosp.columns:
         if "discharge_category" in hosp.columns:
-            hosp["died"] = hosp["discharge_category"].astype(str).str.lower().str.contains(
-                "expired|dead|death|died", na=False
+            # mCIDE discharge_category for death is "Expired"; match common variants
+            hosp["died"] = (
+                hosp["discharge_category"].astype(str).str.strip().str.lower()
+                .isin(["expired", "dead", "death", "died", "deceased"])
             ).astype(int)
         else:
             hosp["died"] = 0
