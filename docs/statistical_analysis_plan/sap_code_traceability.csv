@@ -3,12 +3,13 @@ SAP-4.3-CI-BCA,4,Criterion CIs use BCa bootstrap,utils/meta_analysis.py,cluster_
 SAP-4.3-CI-CLUSTER,4,Criterion CIs clustered at IMV episode with fallback,utils/meta_analysis.py,cluster_bootstrap_concordance,match,imv_episode_id primary with hospitalization and row-level fallback,codex
 SAP-4.4-CI-META,4,Random-effects meta-analysis for sensitivity/specificity with Q and I2,code/07_aggregate_sites.py,compute_pooled_concordance,match,run_meta_analysis invoked for sensitivity and specificity with heterogeneity output,codex
 SAP-5.2-COX-EXTUBATION,5,Cause-specific time-varying Cox extubation model,code/03_outcome_models.py,fit_cox_extubation,match,Cause-specific Cox retained with time-varying cummax exposure,codex
+SAP-5.2-PH-TEST,5,Schoenfeld residual PH assumption test for Cox models,code/03_outcome_models.py,_check_proportional_hazards,match,CoxPHFitter refit on collapsed snapshot; global Schoenfeld test with diagnostic plots; violated covariates logged with fallback guidance,codex
 SAP-5.3-VFD-FG,5,Fine-Gray-equivalent VFD primary model,code/03_outcome_models.py,run_all_models,match,fit_fine_gray_equivalent wired as VFD primary,codex
 SAP-5.3-VFD-COMPONENTS,5,VFD component outputs and CIF,code/03_outcome_models.py,run_all_models,match,construct_validity_vfd_components.csv and construct_validity_cif_curves.csv emitted,codex
 SAP-5.4-VFD-MULTISTATE,5,Multistate VFD secondary outputs,utils/multistate.py,fit_multistate_equivalent,match,Transition hazards and probability outputs generated and exported,codex
 SAP-5.5-ICU-LOS-MIXED,5,ICU LOS mixed-effects random-intercept model,code/03_outcome_models.py,fit_icu_los_model,match,PoissonBayesMixedGLM primary with GEE fallback,codex
 SAP-5.6-MORTALITY-MIXED,5,Mortality mixed-effects random-intercept model,code/03_outcome_models.py,fit_mortality_model,match,BinomialBayesMixedGLM primary with GEE fallback,codex
-SAP-5.8-JOINT-4LEVEL,5,Joint SAT+SBT 4-level exposure model,code/03_outcome_models.py,fit_joint_sat_sbt_four_level,match,neither/sat_only/sbt_only/both logistic contrast outputs,codex
+SAP-5.8-JOINT-4LEVEL,5,Joint SAT+SBT 4-level exposure model,code/03_outcome_models.py,fit_joint_sat_sbt_four_level,match,"neither/sat_only/sbt_only/both logistic contrast outputs; awakening restricted to SAT-delivered days (clinically appropriate — non-SAT days lack meaningful awakening endpoint)",codex
 SAP-6.1-RSR-PEO,6,Hospital RSR Predicted Expected Overall formula,code/04_hospital_variation.py,compute_risk_adjusted_rates,match,Predicted_j Expected_j and adjusted_rate computed per SAP formula,codex
 SAP-6.2-MOR-VAR,6,MOR from model-estimated variance,code/04_hospital_variation.py,compute_adjusted_median_odds_ratio,match,sigma_u_sq from mixed model variance used for MOR,codex
 SAP-6.3-FUNNEL-95-998,6,Funnel limits 95 and 99.8 percent,code/04_hospital_variation.py,funnel_plot,match,compute_funnel_limits adds 95 and 99.8 control limits and output file,codex

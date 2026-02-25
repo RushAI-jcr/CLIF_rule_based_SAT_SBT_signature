@@ -16,6 +16,9 @@ requirements:
   - id: SAP-5.2-COX-EXTUBATION
     section: "5"
     title: "Cause-specific time-varying Cox extubation model"
+  - id: SAP-5.2-PH-TEST
+    section: "5"
+    title: "Schoenfeld residual PH assumption test for Cox models"
   - id: SAP-5.3-VFD-FG
     section: "5"
     title: "Fine-Gray-equivalent VFD primary model"

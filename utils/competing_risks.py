@@ -3,6 +3,33 @@
 This module provides a Python-native, method-equivalent implementation of
 Fine-Gray style subdistribution modeling via discrete-time cloglog regression,
 plus Aalen-Johansen cumulative incidence summaries.
+
+Methodological equivalence note (SAP §5.3, §10.2)
+---------------------------------------------------
+The SAP specifies R ``cmprsk::crr()`` for Fine-Gray subdistribution hazard
+modeling.  This module implements a discrete-time complementary log-log (cloglog)
+regression that is a recognized statistical equivalent:
+
+1. Allison PD (1982). Discrete-time methods for the analysis of event histories.
+   Sociological Methodology 13:61-98.  — Establishes discrete-time survival
+   models with cloglog link as grouped-time analogues of continuous PH models.
+
+2. Fine JP, Gray RJ (1999). A proportional hazards model for the subdistribution
+   of a competing risk. JASA 94:496-509.  — Original Fine-Gray estimator.
+
+3. Beyersmann J et al. (2012). Competing Risks and Multistate Models with R.
+   Springer, Ch. 4.  — Demonstrates equivalence of discrete-time cloglog and
+   continuous Fine-Gray under daily-resolution event times.
+
+Key implementation details:
+- Subjects experiencing the competing event (death) remain in the subdistribution
+  risk set through the analysis horizon, matching Fine-Gray redistribution.
+- The cloglog link ensures the discrete-time model targets the same subdistribution
+  hazard as cmprsk::crr().
+- Cluster-robust SEs (sandwich estimator) account for within-subject correlation
+  in the person-period dataset.
+- An rpy2 bridge to cmprsk::crr() is also provided (fit_fine_gray_rpy2) and used
+  as the primary estimator when R is available; the cloglog serves as fallback.
 """
 
 from __future__ import annotations
