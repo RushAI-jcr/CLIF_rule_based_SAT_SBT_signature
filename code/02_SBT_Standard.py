@@ -106,13 +106,7 @@ def _(cohort, pc, pd):
     cohort_1[['norepinephrine', 'epinephrine', 'phenylephrine', 'angiotensin', 'vasopressin', 'dopamine', 'dobutamine', 'milrinone', 'isoproterenol']] = cohort_1.groupby('hospitalization_id')[['norepinephrine', 'epinephrine', 'phenylephrine', 'angiotensin', 'vasopressin', 'dopamine', 'dobutamine', 'milrinone', 'isoproterenol']].ffill()
     cohort_1[['fio2_set', 'peep_set', 'spo2', 'pressure_support_set']] = cohort_1.groupby('hospitalization_id')[['fio2_set', 'peep_set', 'spo2', 'pressure_support_set']].ffill()
     cohort_1[['norepinephrine', 'epinephrine', 'phenylephrine', 'dopamine', 'angiotensin', 'vasopressin']] = cohort_1[['norepinephrine', 'epinephrine', 'phenylephrine', 'dopamine', 'angiotensin', 'vasopressin']].fillna(0)
-    # NEE per definitions_source_of_truth.compute_norepinephrine_equivalent()
-    # NE 1x, epi 1x, phenylephrine 0.1x, dopamine 0.01x, vasopressin (units/min)/0.04 * 0.1
-    # Angiotensin excluded per locked decisions (not in SBT_VASOPRESSOR_LIMITS)
-    cohort_1['NEE'] = (cohort_1['norepinephrine'] + cohort_1['epinephrine']
-                       + cohort_1['phenylephrine'] * 0.1
-                       + cohort_1['dopamine'] * 0.01
-                       + (cohort_1['vasopressin'] / 0.04) * 0.1)
+    cohort_1['NEE'] = cohort_1['norepinephrine'] + cohort_1['epinephrine'] + cohort_1['phenylephrine'] / 10 + cohort_1['vasopressin'] * 2.5 + cohort_1['dopamine'] / 100 + cohort_1['angiotensin'] * 10
     # Fill forward's
     cohort_1['Hemodynamic_Stability_by_NEE'] = (cohort_1['NEE'] <= 0.2).astype(int)
     cohort_1['Respiratory_Stability'] = ((cohort_1['fio2_set'] <= 0.5) & (cohort_1['peep_set'] <= 8) & (cohort_1['spo2'] >= 88)).astype(int)

@@ -25,15 +25,19 @@ This project follows a three-phase CLIF workflow:
 ## Site-Level vs Central Execution
 
 **At each CLIF site (local):**
-```
-00_cohort_id.ipynb → 01_SAT_standard.ipynb + 02_SBT_Standard.ipynb
+```bash
+bash scripts/run_site.sh
+# Runs: 00_cohort_id → 01_SAT_standard → 02_SBT_Standard → 02_SBT_variants
 ```
 
 **Central analysis (after site outputs collected):**
+```bash
+bash scripts/run_aggregation.sh
+# Runs: 07_aggregate_sites → 03_outcome_models → 04_hospital_variation
+#        → 06_sensitivity_analyses → 05_manuscript_figures
 ```
-07_aggregate_sites.py → 03_outcome_models.py + 04_hospital_variation.py
-                      → 05_manuscript_figures.py + 06_sensitivity_analyses.py
-```
+
+See `SITE_INSTRUCTIONS.md` for detailed site-facing guidance on config, execution, and file transfer.
 
 ## Environment
 
