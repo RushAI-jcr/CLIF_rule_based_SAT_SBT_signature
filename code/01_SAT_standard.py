@@ -13,12 +13,16 @@ def _():
 
 @app.cell
 def _():
+    import os
     import sys
-    sys.path.insert(0, os.path.join(os.pardir, 'utils'))
+    _CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+    _UTILS_DIR = os.path.join(_CODE_DIR, '..', 'utils')
+    if _UTILS_DIR not in sys.path:
+        sys.path.insert(0, _UTILS_DIR)
+    os.chdir(_CODE_DIR)
     import pandas as pd
     import numpy as np
     import re
-    import os
     import matplotlib.pyplot as plt
     import duckdb
     import pyCLIF as pc
@@ -767,7 +771,7 @@ def _(np, pd, re, t1_cohort):
     continuous_cols = ['rass', 'gcs_total', 'cisatracurium', 'vecuronium', 'rocuronium', 'dobutamine', 'dopamine', 'epinephrine', 'fentanyl', 'hydromorphone', 'isoproterenol', 'lorazepam', 'midazolam', 'milrinone', 'morphine', 'norepinephrine', 'phenylephrine', 'propofol', 'vasopressin', 'angiotensin', 'bmi']
     drugs = ['cisatracurium', 'vecuronium', 'rocuronium', 'dobutamine', 'dopamine', 'epinephrine', 'fentanyl', 'hydromorphone', 'isoproterenol', 'lorazepam', 'midazolam', 'milrinone', 'morphine', 'norepinephrine', 'phenylephrine', 'propofol', 'vasopressin', 'angiotensin']
     drugs_present = [d for d in drugs if d in t1_cohort.columns]
-    t1_cohort[drugs_present] = t1_cohort[drugs_present].apply(lambda col: _col.map(lambda x: _x if _x > 0 else np.nan))
+    t1_cohort[drugs_present] = t1_cohort[drugs_present].apply(lambda col: col.map(lambda x: x if x > 0 else np.nan))
     t1_cohort['bmi'] = t1_cohort['weight_kg'] / (t1_cohort['height_cm'] / 100) ** 2
     if 'language_name' in t1_cohort.columns:
         t1_cohort['language_name'] = t1_cohort['language_name'].apply(categorize_language)

@@ -13,8 +13,13 @@ def _():
 
 @app.cell
 def _():
+    import os
     import sys
-    sys.path.insert(0, os.path.join(os.pardir, 'utils'))
+    _CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+    _UTILS_DIR = os.path.join(_CODE_DIR, '..', 'utils')
+    if _UTILS_DIR not in sys.path:
+        sys.path.insert(0, _UTILS_DIR)
+    os.chdir(_CODE_DIR)
     import numpy as np
     import pandas as pd
     import re
@@ -23,7 +28,6 @@ def _():
     from datetime import datetime
     import matplotlib.pyplot as plt
     import seaborn as sns
-    import os
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
     import warnings
     warnings.filterwarnings('ignore')
@@ -235,7 +239,7 @@ def _(final_df_3):
     final_df_3['sbt_bkp'] = final_df_3['sbt_delivery_pass_fail']
     final_df_3['sbt_delivery_pass_fail'] = final_df_3['sbt_delivery_pass_fail'].astype(float).map({0: 1, 1: 1})
     final_df_3['sbt_screen_pass_fail'] = final_df_3['sbt_screen_pass_fail'].astype(float).map({0: 1, 1: 1})
-    final_df_3['flip_skip_reason'] = final_df_3.groupby('hosp_id_day_key')['flip_skip_reason'].transform(lambda x: _x.ffill().bfill())
+    final_df_3['flip_skip_reason'] = final_df_3.groupby('hosp_id_day_key')['flip_skip_reason'].transform(lambda x: x.ffill().bfill())
     return
 
 
@@ -251,7 +255,7 @@ def _(final_df_3):
 
 @app.cell
 def _(final_df_3, np):
-    grouped_df = final_df_3.groupby('hosp_id_day_key').agg({'hospitalization_id': 'first', 'hospital_id': lambda x: _x.dropna().iloc[-1] if _x.dropna().size > 0 else np.nan, 'eligible_day': 'max', 'EHR_Delivery_2mins': 'max', 'EHR_Delivery_30mins': 'max', 'sbt_screen_pass_fail': 'max', 'sbt_delivery_pass_fail': 'max', 'flag_2_45_extubated': 'max', 'flip_skip_reason': lambda x: _x.dropna().iloc[-1] if _x.dropna().size > 0 else np.nan, 'extubated': 'max'}).reset_index()
+    grouped_df = final_df_3.groupby('hosp_id_day_key').agg({'hospitalization_id': 'first', 'hospital_id': lambda x: x.dropna().iloc[-1] if x.dropna().size > 0 else np.nan, 'eligible_day': 'max', 'EHR_Delivery_2mins': 'max', 'EHR_Delivery_30mins': 'max', 'sbt_screen_pass_fail': 'max', 'sbt_delivery_pass_fail': 'max', 'flag_2_45_extubated': 'max', 'flip_skip_reason': lambda x: x.dropna().iloc[-1] if x.dropna().size > 0 else np.nan, 'extubated': 'max'}).reset_index()
     mat_df = grouped_df[grouped_df['eligible_day'] == 1]
     return grouped_df, mat_df
 
@@ -565,8 +569,8 @@ def _(directory_path, eligible_days, final_df_3, mat_df, pd):
         _results.append({'Step': 'Step 7 (Unmatched)', 'FilterColumn': None, 'UniqueKeys': _step7['hosp_id_day_key'].nunique(), 'RowCount': _step7.shape[0], 'ValueCounts': None})
         _detailed_summary_df = pd.DataFrame(_results)
         _total_failures = _detailed_summary_df['UniqueKeys'].sum()
-        _detailed_summary_df['% by eligible_days'] = _detailed_summary_df['UniqueKeys'].apply(lambda x: round(_x / eligible_days * 100, 2))
-        _detailed_summary_df['% of Total'] = _detailed_summary_df['UniqueKeys'].apply(lambda x: round(_x / _total_failures * 100, 2) if _total_failures != 0 else 0)
+        _detailed_summary_df['% by eligible_days'] = _detailed_summary_df['UniqueKeys'].apply(lambda x: round(x / eligible_days * 100, 2))
+        _detailed_summary_df['% of Total'] = _detailed_summary_df['UniqueKeys'].apply(lambda x: round(x / _total_failures * 100, 2) if _total_failures != 0 else 0)
         _output_filename = f'{directory_path}/EHR_VS_SBT_failure_dependent_summary_{_hosp}.csv'
         _detailed_summary_df.to_csv(_output_filename, index=False)
         print(f'Saved detailed summary for hospital {_hosp} to {_output_filename}\n')
@@ -638,8 +642,8 @@ def _(directory_path, eligible_days, final_df_3, mat_df, pd):
         _results.append({'Step': 'Step 7 (No Value)', 'FilterColumn': None, 'UniqueKeys': _step7['hosp_id_day_key'].nunique(), 'RowCount': _step7.shape[0], 'ValueCounts': None})
         _detailed_summary_df = pd.DataFrame(_results)
         _total_failures = _detailed_summary_df['UniqueKeys'].sum()
-        _detailed_summary_df['% by eligible_days'] = _detailed_summary_df['UniqueKeys'].apply(lambda x: round(_x / eligible_days * 100, 2))
-        _detailed_summary_df['% of Total'] = _detailed_summary_df['UniqueKeys'].apply(lambda x: round(_x / _total_failures * 100, 2) if _total_failures != 0 else 0)
+        _detailed_summary_df['% by eligible_days'] = _detailed_summary_df['UniqueKeys'].apply(lambda x: round(x / eligible_days * 100, 2))
+        _detailed_summary_df['% of Total'] = _detailed_summary_df['UniqueKeys'].apply(lambda x: round(x / _total_failures * 100, 2) if _total_failures != 0 else 0)
         _output_filename = f'{directory_path}/EHR_VS_EXTUBATED_failure_dependent_summary_{_hosp}.csv'
         _detailed_summary_df.to_csv(_output_filename, index=False)
         print(f'Saved detailed summary for hospital {_hosp} to {_output_filename}\n')
@@ -834,7 +838,7 @@ def _(np, pd, re, t1_cohort):
     demographic_columns = ['sex_category', 'race_category', 'ethnicity_category', 'language_name']
     continuous_cols = ['rass', 'gcs_total', 'cisatracurium', 'vecuronium', 'rocuronium', 'dobutamine', 'dopamine', 'epinephrine', 'fentanyl', 'hydromorphone', 'isoproterenol', 'lorazepam', 'midazolam', 'milrinone', 'morphine', 'norepinephrine', 'phenylephrine', 'propofol', 'vasopressin', 'angiotensin', 'bmi']
     drugs = ['cisatracurium', 'vecuronium', 'rocuronium', 'dobutamine', 'dopamine', 'epinephrine', 'fentanyl', 'hydromorphone', 'isoproterenol', 'lorazepam', 'midazolam', 'milrinone', 'morphine', 'norepinephrine', 'phenylephrine', 'propofol', 'vasopressin', 'angiotensin']
-    t1_cohort[drugs] = t1_cohort[drugs].applymap(lambda x: _x if _x > 0 else np.nan)
+    t1_cohort[drugs] = t1_cohort[drugs].applymap(lambda x: x if x > 0 else np.nan)
     t1_cohort['bmi'] = t1_cohort['weight_kg'] / (t1_cohort['height_cm'] / 100) ** 2
     t1_cohort['language_name'] = t1_cohort['language_name'].apply(categorize_language)
     # Apply the transformation

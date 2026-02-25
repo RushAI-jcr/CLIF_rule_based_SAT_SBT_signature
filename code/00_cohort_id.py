@@ -13,10 +13,15 @@ def _():
 
 @app.cell
 def _():
-    import sys
-    sys.path.insert(0, os.path.join(os.pardir, 'utils'))
-    import pandas as pd
     import os
+    import sys
+    _CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+    _UTILS_DIR = os.path.join(_CODE_DIR, '..', 'utils')
+    if _UTILS_DIR not in sys.path:
+        sys.path.insert(0, _UTILS_DIR)
+    # Change CWD to code/ so relative paths (../output, ../config) work
+    os.chdir(_CODE_DIR)
+    import pandas as pd
     from tqdm import tqdm
     import numpy as np
     import pytz
@@ -590,27 +595,27 @@ def _(pc, required_id, vit, vit_col):
 
 
 @app.cell
-def _(json, np, vit_1):
+def _(np, vit_1):
     # H10 Fix: Apply outlier thresholds to vitals from config
     import json as _json
     from pathlib import Path as _Path
     _outlier_path = _Path('../config/outlier_config.json')
     try:
         with open(_outlier_path, 'r') as _f:
-            _outlier_cfg = _json.load(_f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        _outlier_cfg = {}
-    if _outlier_cfg:
+            outlier_cfg = _json.load(_f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        outlier_cfg = {}
+    if outlier_cfg:
         _vitals_before = len(vit_1)
         for _vcat, _cfg_key in [('spo2', 'spo2'), ('map', 'map'), ('heart_rate', 'heart_rate'), ('sbp', 'sbp'), ('dbp', 'dbp'), ('respiratory_rate', 'respiratory_rate'), ('weight_kg', 'weight_kg'), ('height_cm', 'height_cm')]:
-            if _cfg_key in _outlier_cfg:
-                _lo, _hi = _outlier_cfg[_cfg_key]
+            if _cfg_key in outlier_cfg:
+                _lo, _hi = outlier_cfg[_cfg_key]
                 _mask = (vit_1['vital_category'] == _vcat) & ~vit_1['vital_value'].between(_lo, _hi)
                 vit_1.loc[_mask, 'vital_value'] = np.nan
         _nulled = vit_1['vital_value'].isna().sum()
         print(f'Vitals outlier thresholds applied. NaN values after: {_nulled}')
-        vit_weight_1 = vit_1[vit_1['vital_category'] == 'weight_kg'].reset_index(drop=True)  # Also update vit_weight with cleaned weights
-    return (vit_weight_1,)
+    vit_weight_1 = vit_1[vit_1['vital_category'] == 'weight_kg'].reset_index(drop=True)  # Also update vit_weight with cleaned weights
+    return outlier_cfg, vit_weight_1
 
 
 @app.cell
@@ -703,13 +708,13 @@ def _(new_mac_1, tqdm):
 
 
 @app.cell
-def _(new_mac_2, np):
+def _(new_mac_2, np, outlier_cfg):
     # H10 Fix: Apply outlier thresholds to medication doses after unit conversion
-    if _outlier_cfg:
+    if outlier_cfg:
         _med_before = new_mac_2['med_dose'].notna().sum()
         for _mcat in new_mac_2['med_category'].unique():
-            if _mcat in _outlier_cfg:
-                _lo, _hi = _outlier_cfg[_mcat]
+            if _mcat in outlier_cfg:
+                _lo, _hi = outlier_cfg[_mcat]
                 _mask = (new_mac_2['med_category'] == _mcat) & ~new_mac_2['med_dose'].between(_lo, _hi)
                 new_mac_2.loc[_mask, 'med_dose'] = np.nan
         _med_after = new_mac_2['med_dose'].notna().sum()
