@@ -39,6 +39,7 @@ from definitions_source_of_truth import (
     SENSITIVITY_SAT_DURATIONS_MIN,
     SENSITIVITY_SBT_DURATIONS_MIN,
     SENSITIVITY_SBT_PS_THRESHOLDS,
+    SENSITIVITY_SBT_CPAP_THRESHOLDS,
     SBT_MODIFIED_DURATION_MIN,
 )
 from pySAT import detect_sat_delivery
@@ -56,6 +57,118 @@ def _load_df(path: str) -> pd.DataFrame:
     if path.endswith(".parquet"):
         return pd.read_parquet(path)
     return pd.read_csv(path, low_memory=False)
+
+
+def enforce_missing_data_windows(cohort_df: pd.DataFrame, output_dir: str) -> pd.DataFrame:
+    """Apply SAP missing-data windows.
+
+    Rules:
+    - FiO2 / PEEP windows: <= 6 hours
+    - SpO2 / hemodynamics windows: <= 2 hours
+    """
+    df = cohort_df.copy()
+    rules = {
+        "fio2_set": 6.0,
+        "peep_set": 6.0,
+        "spo2": 2.0,
+        "norepinephrine": 2.0,
+        "epinephrine": 2.0,
+        "vasopressin": 2.0,
+        "dopamine": 2.0,
+        "phenylephrine": 2.0,
+    }
+    audit_rows: list[dict[str, object]] = []
+
+    def _find_age_col(var: str) -> str | None:
+        candidates = [
+            f"{var}_hours_since_last",
+            f"{var}_hours_since_measurement",
+            f"{var}_age_hours",
+            f"{var}_age_hr",
+        ]
+        for c in candidates:
+            if c in df.columns:
+                return c
+        for c in df.columns:
+            low = c.lower()
+            if var.lower() in low and "hour" in low and ("since" in low or "age" in low):
+                return c
+        return None
+
+    for var, max_hours in rules.items():
+        if var not in df.columns:
+            audit_rows.append(
+                {"variable": var, "window_hours": max_hours, "status": "column_missing", "n_staled": 0}
+            )
+            continue
+        age_col = _find_age_col(var)
+        if age_col is None:
+            audit_rows.append(
+                {"variable": var, "window_hours": max_hours, "status": "age_col_missing", "n_staled": 0}
+            )
+            continue
+        ages = pd.to_numeric(df[age_col], errors="coerce")
+        stale_mask = ages > max_hours
+        n_staled = int(stale_mask.fillna(False).sum())
+        df.loc[stale_mask, var] = np.nan
+        audit_rows.append(
+            {
+                "variable": var,
+                "window_hours": max_hours,
+                "status": "applied",
+                "age_col_used": age_col,
+                "n_staled": n_staled,
+            }
+        )
+
+    pd.DataFrame(audit_rows).to_csv(
+        os.path.join(output_dir, "missing_data_window_audit.csv"),
+        index=False,
+    )
+    return df
+
+
+def apply_eligibility_missing_source_exclusions(
+    cohort_df: pd.DataFrame, output_dir: str
+) -> pd.DataFrame:
+    """Exclude records missing required source fields before trial classification."""
+    df = cohort_df.copy()
+    required_cols = [c for c in ["fio2_set", "peep_set", "spo2"] if c in df.columns]
+    if not required_cols:
+        pd.DataFrame(
+            [
+                {
+                    "status": "skipped",
+                    "reason": "required source columns not available",
+                }
+            ]
+        ).to_csv(os.path.join(output_dir, "eligibility_missing_source_exclusions.csv"), index=False)
+        return df
+
+    missing_required = df[required_cols].isna().any(axis=1)
+    eligible_mask = pd.Series(False, index=df.index)
+    if "eligible_event" in df.columns:
+        eligible_mask = eligible_mask | (pd.to_numeric(df["eligible_event"], errors="coerce") == 1)
+    if "eligible_day" in df.columns:
+        eligible_mask = eligible_mask | (pd.to_numeric(df["eligible_day"], errors="coerce") == 1)
+    excluded_mask = eligible_mask & missing_required
+    summary = pd.DataFrame(
+        [
+            {
+                "n_rows_total": int(len(df)),
+                "n_eligible_rows": int(eligible_mask.sum()),
+                "n_excluded_missing_sources": int(excluded_mask.sum()),
+                "required_cols": ",".join(required_cols),
+            }
+        ]
+    )
+    summary.to_csv(
+        os.path.join(output_dir, "eligibility_missing_source_exclusions.csv"),
+        index=False,
+    )
+    df["excluded_missing_sources"] = excluded_mask.astype(int)
+    df = df.loc[~excluded_mask].copy()
+    return df
 
 
 # ============================================================
@@ -295,39 +408,99 @@ def sensitivity_exclusions(cohort_df, output_dir):
     4. Day 0 of IMV (day of intubation)
     """
     results = []
+    n_before = cohort_df["hosp_id_day_key"].nunique() if "hosp_id_day_key" in cohort_df.columns else len(cohort_df)
+    working = cohort_df.copy()
 
-    # Day 0 exclusion (most straightforward)
-    if "day_number" in cohort_df.columns:
-        n_before = cohort_df["hosp_id_day_key"].nunique()
-        excluded = cohort_df[cohort_df["day_number"] > 1]
-        n_after = excluded["hosp_id_day_key"].nunique()
-        results.append({
-            "exclusion": "IMV day 0 (intubation day)",
-            "days_before": n_before,
-            "days_after": n_after,
-            "days_excluded": n_before - n_after,
-            "status": "computed",
-        })
+    def _find_flag_col(keywords: list[str]) -> str | None:
+        for col in working.columns:
+            low = col.lower()
+            if all(k in low for k in keywords):
+                return col
+        return None
+
+    def _to_bool(s: pd.Series) -> pd.Series:
+        if pd.api.types.is_bool_dtype(s):
+            return s.fillna(False)
+        if pd.api.types.is_numeric_dtype(s):
+            return s.fillna(0).astype(float).gt(0)
+        return s.astype(str).str.lower().isin(
+            {"1", "true", "yes", "y", "present", "positive", "active"}
+        )
+
+    # IMV day 0 / day 1 exclusion.
+    if "day_number" in working.columns:
+        pre = len(working)
+        working = working[pd.to_numeric(working["day_number"], errors="coerce") > 1]
+        results.append(
+            {
+                "exclusion": "IMV day 0/day 1",
+                "status": "computed",
+                "rows_before": pre,
+                "rows_after": len(working),
+                "rows_excluded": pre - len(working),
+            }
+        )
     else:
-        results.append({
-            "exclusion": "IMV day 0 (intubation day)",
-            "note": "day_number column not available",
-            "status": "needs_data",
-        })
+        results.append(
+            {
+                "exclusion": "IMV day 0/day 1",
+                "status": "needs_data",
+                "note": "day_number column unavailable",
+            }
+        )
 
-    # Other exclusions need ICD codes or additional CLIF tables
-    for excl in ["Cardiac arrest diagnosis", "Targeted temperature management",
-                 "Comfort care status"]:
-        results.append({
-            "exclusion": excl,
-            "note": "Requires hospital_diagnosis or code_status CLIF table",
-            "status": "needs_data",
-        })
+    exclusion_specs = [
+        ("Cardiac arrest diagnosis", ["cardiac", "arrest"]),
+        ("Targeted temperature management", ["ttm"]),
+        ("Comfort care status", ["comfort", "care"]),
+    ]
+    for label, keywords in exclusion_specs:
+        col = _find_flag_col(keywords)
+        if col is None and label == "Targeted temperature management":
+            col = _find_flag_col(["temperature", "management"])
+        if col is None and label == "Comfort care status":
+            col = _find_flag_col(["code", "status"])
+        if col is None:
+            results.append(
+                {
+                    "exclusion": label,
+                    "status": "needs_data",
+                    "note": f"No matching columns for keywords={keywords}",
+                }
+            )
+            continue
+        flag = _to_bool(working[col])
+        pre = len(working)
+        working = working[~flag]
+        results.append(
+            {
+                "exclusion": label,
+                "status": "computed",
+                "source_col": col,
+                "rows_before": pre,
+                "rows_after": len(working),
+                "rows_excluded": pre - len(working),
+            }
+        )
+
+    n_after = working["hosp_id_day_key"].nunique() if "hosp_id_day_key" in working.columns else len(working)
+    summary = {
+        "exclusion": "Population restriction summary",
+        "status": "computed",
+        "days_before": int(n_before),
+        "days_after": int(n_after),
+        "days_excluded": int(n_before - n_after),
+    }
+    results.append(summary)
 
     pd.DataFrame(results).to_csv(
         os.path.join(output_dir, "sensitivity_exclusions.csv"), index=False
     )
-    print(f"  Clinical exclusion sensitivity saved")
+    working.to_csv(
+        os.path.join(output_dir, "sensitivity_population_restricted_cohort.csv"),
+        index=False,
+    )
+    print("  Clinical exclusion sensitivity saved")
 
 
 # ============================================================
@@ -336,24 +509,193 @@ def sensitivity_exclusions(cohort_df, output_dir):
 
 def sensitivity_first_episode(cohort_df, output_dir):
     """Restrict to first IMV episode per hospitalization."""
-    if "day_number" not in cohort_df.columns:
-        print("  Cannot identify first episode without episode tracking")
+    work = cohort_df.copy()
+    episode_col = None
+    for c in work.columns:
+        if c.lower() == "imv_episode_id":
+            episode_col = c
+            break
+    if episode_col is None:
+        print("  Cannot identify first episode without imv_episode_id")
+        pd.DataFrame(
+            [
+                {
+                    "analysis": "First IMV episode only",
+                    "status": "needs_data",
+                    "note": "imv_episode_id column not available",
+                }
+            ]
+        ).to_csv(os.path.join(output_dir, "sensitivity_first_episode.csv"), index=False)
         return
 
-    # Identify first episode (lowest day numbers per hospitalization)
-    # This is an approximation; true episode identification requires
-    # classify_imv_episodes() from definitions_source_of_truth.py
+    pre_rows = len(work)
+    first = work[work[episode_col].astype(str).str.endswith("_ep_1", na=False)].copy()
+    if first.empty:
+        # Fallback: first unique episode label per hospitalization.
+        first_episode = (
+            work.groupby("hospitalization_id")[episode_col].first().rename("first_episode").reset_index()
+        )
+        first = work.merge(first_episode, on="hospitalization_id", how="left")
+        first = first[first[episode_col] == first["first_episode"]].drop(columns=["first_episode"])
+
     results = {
         "analysis": "First IMV episode only",
-        "total_hospitalizations": cohort_df["hospitalization_id"].nunique(),
-        "note": "Framework ready - requires IMV episode classification",
-        "status": "framework_ready",
+        "status": "computed",
+        "total_rows_before": int(pre_rows),
+        "total_rows_after": int(len(first)),
+        "total_hospitalizations_before": int(work["hospitalization_id"].nunique()),
+        "total_hospitalizations_after": int(first["hospitalization_id"].nunique()),
     }
 
     pd.DataFrame([results]).to_csv(
         os.path.join(output_dir, "sensitivity_first_episode.csv"), index=False
     )
-    print(f"  First episode sensitivity framework saved")
+    first.to_csv(
+        os.path.join(output_dir, "sensitivity_first_episode_cohort.csv"),
+        index=False,
+    )
+    print("  First episode sensitivity saved")
+
+
+def completeness_threshold_reruns(cohort_df: pd.DataFrame, output_dir: str) -> None:
+    """Run >=90% completeness restrictions and emit side-by-side counts."""
+    work = cohort_df.copy()
+    if work.empty:
+        return
+
+    vent_cols = [c for c in ["fio2_set", "peep_set", "mode_category"] if c in work.columns]
+    mar_cols = [c for c in ["propofol", "fentanyl", "midazolam", "sat_delivery_pass_fail", "sbt_delivery_pass_fail"] if c in work.columns]
+
+    if vent_cols:
+        work["vent_complete"] = work[vent_cols].notna().mean(axis=1)
+    else:
+        work["vent_complete"] = np.nan
+    if mar_cols:
+        work["mar_complete"] = work[mar_cols].notna().mean(axis=1)
+    else:
+        work["mar_complete"] = np.nan
+
+    base_rows = len(work)
+    vent_restricted = work[work["vent_complete"] >= 0.9] if vent_cols else work.iloc[0:0]
+    mar_restricted = work[work["mar_complete"] >= 0.9] if mar_cols else work.iloc[0:0]
+    both_restricted = work[
+        (work["vent_complete"] >= 0.9) & (work["mar_complete"] >= 0.9)
+    ] if (vent_cols and mar_cols) else work.iloc[0:0]
+
+    summary = pd.DataFrame(
+        [
+            {
+                "restriction": "none",
+                "rows": int(base_rows),
+                "fraction": 1.0,
+            },
+            {
+                "restriction": "vent_settings_ge_90pct",
+                "rows": int(len(vent_restricted)),
+                "fraction": float(len(vent_restricted) / base_rows) if base_rows else np.nan,
+            },
+            {
+                "restriction": "mar_ge_90pct",
+                "rows": int(len(mar_restricted)),
+                "fraction": float(len(mar_restricted) / base_rows) if base_rows else np.nan,
+            },
+            {
+                "restriction": "vent_and_mar_ge_90pct",
+                "rows": int(len(both_restricted)),
+                "fraction": float(len(both_restricted) / base_rows) if base_rows else np.nan,
+            },
+        ]
+    )
+    summary.to_csv(
+        os.path.join(output_dir, "sensitivity_completeness_threshold_reruns.csv"),
+        index=False,
+    )
+    print("  Completeness-threshold reruns saved")
+
+
+# ============================================================
+# SENSITIVITY: OUTCOME MODEL RE-RUNS [SAP 2.10]
+# ============================================================
+
+def run_outcome_sensitivity(
+    restricted_df: pd.DataFrame,
+    label: str,
+    output_dir: str,
+) -> None:
+    """Re-run all outcome models on a restricted population [SAP 2.10].
+
+    After each population restriction (day 0-1 exclusion, cardiac arrest,
+    TTM, comfort care, first episode), outcome models are re-fit.
+    """
+    from pathlib import Path
+    sens_dir = os.path.join(output_dir, f"outcomes_{label}")
+    os.makedirs(sens_dir, exist_ok=True)
+
+    try:
+        sys.path.insert(0, os.path.dirname(__file__))
+        from importlib import import_module
+        om = import_module("03_outcome_models")
+
+        # Write restricted data to temp files for run_all_models
+        sat_path = os.path.join(sens_dir, "restricted_sat.csv")
+        sbt_path = os.path.join(sens_dir, "restricted_sbt.csv")
+        restricted_df.to_csv(sat_path, index=False)
+        restricted_df.to_csv(sbt_path, index=False)
+
+        om.run_all_models(
+            sat_file=sat_path,
+            sbt_file=sbt_path,
+            output_dir=sens_dir,
+            include_vfd_sensitivities=False,
+            disable_multiplicity=True,
+        )
+        print(f"  Outcome sensitivity '{label}' saved to {sens_dir}")
+    except Exception as e:
+        print(f"  Outcome sensitivity '{label}' failed: {e}")
+        pd.DataFrame([{
+            "analysis": f"outcome_sensitivity_{label}",
+            "status": "failed",
+            "error": str(e),
+        }]).to_csv(os.path.join(sens_dir, "outcome_sensitivity_error.csv"), index=False)
+
+
+# ============================================================
+# SENSITIVITY: CPAP THRESHOLD SWEEP [SAP 2.11]
+# ============================================================
+
+def sensitivity_cpap_thresholds(sbt_file: str, output_dir: str) -> None:
+    """Re-run SBT delivery with alternative CPAP thresholds [SAP 2.11]."""
+    os.makedirs(output_dir, exist_ok=True)
+    sbt_df = _load_df(sbt_file)
+    results = []
+    for cpap in SENSITIVITY_SBT_CPAP_THRESHOLDS:
+        print(f"  Running SBT detection: CPAP<={cpap} cmH2O ...")
+        try:
+            result_df = process_diagnostic_flip_sbt_optimized_v2(
+                sbt_df.copy(),
+                cpap_threshold=cpap,
+            )
+            n_vent_days = result_df["hosp_id_day_key"].nunique() if "hosp_id_day_key" in result_df.columns else len(result_df)
+            primary_col = "EHR_Delivery_2mins"
+            delivered = int(result_df[primary_col].sum()) if primary_col in result_df.columns else 0
+            rate = delivered / n_vent_days if n_vent_days > 0 else np.nan
+            results.append({
+                "analysis": "SBT CPAP threshold sweep",
+                "cpap_threshold_cmH2O": cpap,
+                "n_eligible_vent_days": n_vent_days,
+                "SBT_delivered_days": delivered,
+                "SBT_delivery_rate": round(rate, 4) if not np.isnan(rate) else np.nan,
+            })
+        except Exception as e:
+            results.append({
+                "analysis": "SBT CPAP threshold sweep",
+                "cpap_threshold_cmH2O": cpap,
+                "error": str(e),
+            })
+    pd.DataFrame(results).to_csv(
+        os.path.join(output_dir, "sensitivity_cpap_thresholds.csv"), index=False
+    )
+    print(f"  CPAP threshold sensitivity saved")
 
 
 # ============================================================
@@ -365,6 +707,8 @@ def run_all_sensitivity(
     output_dir: str,
     sat_file: str | None = None,
     sbt_file: str | None = None,
+    run_population_restrictions: bool = True,
+    run_completeness_threshold_reruns: bool = True,
 ) -> None:
     """Run all sensitivity analyses.
 
@@ -391,6 +735,12 @@ def run_all_sensitivity(
 
     print(f"Cohort: {len(cohort):,} rows, "
           f"{cohort['hospitalization_id'].nunique():,} hospitalizations")
+
+    print("\n0. Applying SAP missing-data windows...")
+    cohort = enforce_missing_data_windows(cohort, output_dir)
+
+    print("\n0b. Applying eligibility missing-source exclusions...")
+    cohort = apply_eligibility_missing_source_exclusions(cohort, output_dir)
 
     print("\n1. Data completeness assessment...")
     assess_data_completeness(cohort, output_dir)
@@ -434,10 +784,42 @@ def run_all_sensitivity(
         )
 
     print("\n4. Clinical exclusions...")
-    sensitivity_exclusions(cohort, output_dir)
+    if run_population_restrictions:
+        sensitivity_exclusions(cohort, output_dir)
+    else:
+        print("  Skipped population restrictions by CLI option.")
 
     print("\n5. First episode restriction...")
-    sensitivity_first_episode(cohort, output_dir)
+    if run_population_restrictions:
+        sensitivity_first_episode(cohort, output_dir)
+    else:
+        print("  Skipped first-episode restriction by CLI option.")
+
+    print("\n6. Completeness-threshold reruns...")
+    if run_completeness_threshold_reruns:
+        completeness_threshold_reruns(cohort, output_dir)
+    else:
+        print("  Skipped completeness reruns by CLI option.")
+
+    # 7. CPAP threshold sweep [SAP 2.11]
+    print("\n7. CPAP threshold sensitivity...")
+    if sbt_file is not None:
+        sensitivity_cpap_thresholds(sbt_file, output_dir)
+    else:
+        print("  No --sbt-file; skipping CPAP sweep.")
+
+    # 8. Outcome model re-runs on restricted populations [SAP 2.10]
+    print("\n8. Outcome sensitivity re-runs...")
+    if run_population_restrictions:
+        restricted_path = os.path.join(output_dir, "sensitivity_population_restricted_cohort.csv")
+        if os.path.exists(restricted_path):
+            restricted = pd.read_csv(restricted_path, low_memory=False)
+            run_outcome_sensitivity(restricted, "population_restricted", output_dir)
+
+        first_ep_path = os.path.join(output_dir, "sensitivity_first_episode_cohort.csv")
+        if os.path.exists(first_ep_path):
+            first_ep = pd.read_csv(first_ep_path, low_memory=False)
+            run_outcome_sensitivity(first_ep, "first_episode_only", output_dir)
 
     print(f"\nAll sensitivity analyses saved to {output_dir}")
 
@@ -469,10 +851,36 @@ if __name__ == "__main__":
         default="../output/final/sensitivity",
         help="Directory to write all sensitivity output CSVs",
     )
+    parser.add_argument(
+        "--run-population-restrictions",
+        action="store_true",
+        default=True,
+        help="Run day0/day1 + diagnosis/status population restrictions (default on).",
+    )
+    parser.add_argument(
+        "--skip-population-restrictions",
+        action="store_false",
+        dest="run_population_restrictions",
+        help="Skip population-restriction sensitivity analyses.",
+    )
+    parser.add_argument(
+        "--run-completeness-threshold-reruns",
+        action="store_true",
+        default=True,
+        help="Run >=90% vent-settings/MAR completeness threshold reruns (default on).",
+    )
+    parser.add_argument(
+        "--skip-completeness-threshold-reruns",
+        action="store_false",
+        dest="run_completeness_threshold_reruns",
+        help="Skip completeness-threshold reruns.",
+    )
     args = parser.parse_args()
     run_all_sensitivity(
         cohort_path=args.cohort,
         output_dir=args.output_dir,
         sat_file=args.sat_file,
         sbt_file=args.sbt_file,
+        run_population_restrictions=args.run_population_restrictions,
+        run_completeness_threshold_reruns=args.run_completeness_threshold_reruns,
     )

@@ -96,7 +96,6 @@ SBT_CONTROLLED_MODES = [
     "assist control-volume control",
     "pressure control",
     "pressure-regulated volume control",
-    "simv",
 ]
 
 # Minimum hours on controlled mode for SBT eligibility
@@ -197,9 +196,10 @@ VASOPRESSORS = [
 # SENSITIVITY ANALYSIS PARAMETERS
 # ============================================================
 
-SENSITIVITY_SAT_DURATIONS_MIN = [15, 30, 45, 60]
+SENSITIVITY_SAT_DURATIONS_MIN = [15, 30, 60]
 SENSITIVITY_SBT_DURATIONS_MIN = [2, 5, 30]
-SENSITIVITY_SBT_PS_THRESHOLDS = [8, 10, 12]
+SENSITIVITY_SBT_PS_THRESHOLDS = [5, 8, 10]  # PS ≤5, ≤8 (primary), ≤10
+SENSITIVITY_SBT_CPAP_THRESHOLDS = [5, 8]    # CPAP ≤5, ≤8 (primary)
 
 # Exclusion conditions for sensitivity analyses
 SENSITIVITY_EXCLUSIONS = [
@@ -273,6 +273,10 @@ def classify_imv_episodes(resp_df, gap_hours=IMV_EPISODE_GAP_HOURS):
     )
     df.drop(columns=["time_diff", "new_episode"], inplace=True)
     return df
+
+
+# Surgical ICU location categories for medical_admission derivation [SAP 2.8]
+SURGICAL_ICU_LOCATIONS = {"sicu", "cticu", "cardiac_surgery_icu"}
 
 
 def compute_norepinephrine_equivalent(row):

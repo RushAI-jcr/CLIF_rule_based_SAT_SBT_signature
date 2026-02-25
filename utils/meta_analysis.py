@@ -14,11 +14,14 @@ Usage:
     )
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
 from pathlib import Path
+from typing import Any
 from statsmodels.stats.meta_analysis import combine_effects
 
 matplotlib.rcParams.update({
@@ -31,7 +34,7 @@ matplotlib.rcParams.update({
 # LOGIT TRANSFORMATION FOR PROPORTIONS
 # ============================================================
 
-def logit_transform(p, n):
+def logit_transform(p: np.ndarray | list[float], n: np.ndarray | list[int]) -> tuple[np.ndarray, np.ndarray]:
     """Transform proportion to logit scale with continuity correction.
 
     For meta-analysis of proportions, pooling on the logit scale is
@@ -66,7 +69,13 @@ def inv_logit(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
-def _hksj_adjustment(eff, var_eff, pooled_eff, tau2, k):
+def _hksj_adjustment(
+    eff: np.ndarray,
+    var_eff: np.ndarray,
+    pooled_eff: float,
+    tau2: float,
+    k: int,
+) -> tuple[float, float]:
     """Hartung-Knapp-Sidik-Jonkman CI adjustment for random-effects meta-analysis.
 
     Replaces the standard normal z-based CI with a t-distribution CI using
@@ -97,7 +106,7 @@ def cluster_bootstrap_concordance(
     n_boot: int = 1000,
     seed: int = 42,
 ) -> dict:
-    """Cluster-bootstrap concordance metrics with 95% percentile CIs.
+    """Cluster-bootstrap concordance metrics with 95% BCa CIs.
 
     Resamples clusters (ventilator episodes or hospitalizations) with
     replacement to propagate within-cluster correlation into confidence
@@ -126,9 +135,8 @@ def cluster_bootstrap_concordance(
     dict
         Keys for each metric (``sensitivity``, ``specificity``, ``ppv``,
         ``npv``, ``f1``, ``accuracy``, ``kappa``) each mapped to a sub-dict
-        with ``estimate``, ``ci_low`` (2.5th pct), and ``ci_high``
-        (97.5th pct).  Also contains top-level ``n_rows`` and
-        ``n_clusters`` for reporting.
+        with ``estimate``, ``ci_low``, and ``ci_high`` (BCa). Also contains
+        top-level ``n_rows`` / ``n_clusters`` / CI provenance fields.
 
     Notes
     -----
@@ -152,9 +160,11 @@ def cluster_bootstrap_concordance(
     if missing:
         raise ValueError(f"cluster_bootstrap_concordance: missing columns {missing}")
 
-    df = day_level_df[[c for c in [cluster_col, "imv_episode_id",
-                                    "hospitalization_id", ehr_col, flowsheet_col]
-                        if c in day_level_df.columns]].copy()
+    select_cols: list[str] = []
+    for col in [cluster_col, "imv_episode_id", "hospitalization_id", ehr_col, flowsheet_col]:
+        if col in day_level_df.columns and col not in select_cols:
+            select_cols.append(col)
+    df = day_level_df[select_cols].copy()
     df = df.dropna(subset=[ehr_col, flowsheet_col])
     df[ehr_col] = df[ehr_col].astype(int)
     df[flowsheet_col] = df[flowsheet_col].astype(int)
@@ -234,20 +244,116 @@ def cluster_bootstrap_concordance(
                                      boot_df[flowsheet_col].values)
             )
 
-    boot_arr = {k: np.array([r[k] for r in boot_records])
-                for k in point}
+    boot_arr = {k: np.array([r[k] for r in boot_records]) for k in point}
+
+    # --- Jackknife for BCa acceleration -----------------------------------
+    jackknife_arr: dict[str, np.ndarray] = {}
+    if effective_cluster is not None:
+        units = df[effective_cluster].unique()
+        jack_records: list[dict[str, float]] = []
+        for unit in units:
+            jack_df = df[df[effective_cluster] != unit]
+            if jack_df.empty:
+                continue
+            jack_records.append(
+                _metrics_from_arrays(jack_df[ehr_col].values, jack_df[flowsheet_col].values)
+            )
+        if jack_records:
+            jackknife_arr = {k: np.array([r[k] for r in jack_records]) for k in point}
+    else:
+        # Row-level jackknife is expensive; use deterministic subsample when large.
+        max_jack = min(len(df), 500)
+        jack_idx = np.linspace(0, len(df) - 1, max_jack, dtype=int)
+        jack_records = []
+        for i in jack_idx:
+            jack_df = df.drop(df.index[i])
+            if jack_df.empty:
+                continue
+            jack_records.append(
+                _metrics_from_arrays(jack_df[ehr_col].values, jack_df[flowsheet_col].values)
+            )
+        if jack_records:
+            jackknife_arr = {k: np.array([r[k] for r in jack_records]) for k in point}
+
+    def _bca_ci(
+        point_est: float,
+        boot_vals: np.ndarray,
+        jack_vals: np.ndarray | None,
+        alpha: float = 0.05,
+    ) -> tuple[float, float, float, float]:
+        """Bias-corrected and accelerated (BCa) CI with percentile CI always returned.
+
+        Returns
+        -------
+        (bca_low, bca_high, pctl_low, pctl_high)
+            BCa interval (falls back to percentile when jackknife unavailable) and
+            plain percentile interval, both at the requested alpha level.
+        """
+        from scipy.stats import norm
+
+        clean_boot = np.asarray(boot_vals, dtype=float)
+        clean_boot = clean_boot[np.isfinite(clean_boot)]
+
+        pctl_low = float(np.percentile(clean_boot, 100 * alpha / 2)) if clean_boot.size else np.nan
+        pctl_high = float(np.percentile(clean_boot, 100 * (1 - alpha / 2))) if clean_boot.size else np.nan
+
+        if clean_boot.size < 10:
+            return pctl_low, pctl_high, pctl_low, pctl_high
+
+        if jack_vals is None or len(jack_vals) < 3:
+            return pctl_low, pctl_high, pctl_low, pctl_high
+
+        clean_jack = np.asarray(jack_vals, dtype=float)
+        clean_jack = clean_jack[np.isfinite(clean_jack)]
+        if clean_jack.size < 3:
+            return pctl_low, pctl_high, pctl_low, pctl_high
+
+        prop_less = np.mean(clean_boot < point_est)
+        prop_less = float(np.clip(prop_less, 1e-6, 1 - 1e-6))
+        z0 = float(norm.ppf(prop_less))
+
+        jack_mean = float(clean_jack.mean())
+        diffs = jack_mean - clean_jack
+        num = float(np.sum(diffs**3))
+        den = float(6.0 * (np.sum(diffs**2) ** 1.5))
+        accel = num / den if den > 0 else 0.0
+
+        z_low = float(norm.ppf(alpha / 2))
+        z_high = float(norm.ppf(1 - alpha / 2))
+        adj_low = norm.cdf(z0 + (z0 + z_low) / (1 - accel * (z0 + z_low)))
+        adj_high = norm.cdf(z0 + (z0 + z_high) / (1 - accel * (z0 + z_high)))
+        adj_low = float(np.clip(adj_low, 0.0, 1.0))
+        adj_high = float(np.clip(adj_high, 0.0, 1.0))
+
+        bca_lo = float(np.quantile(clean_boot, adj_low))
+        bca_hi = float(np.quantile(clean_boot, adj_high))
+        return bca_lo, bca_hi, pctl_low, pctl_high
 
     # --- Assemble output ---------------------------------------------------
-    result: dict = {
+    bootstrap_level = (
+        "episode_cluster"
+        if effective_cluster == "imv_episode_id"
+        else "hospitalization_cluster"
+        if effective_cluster == "hospitalization_id"
+        else "row_level"
+    )
+    result: dict[str, Any] = {
         "n_rows": len(df),
         "n_clusters": n_clusters,
         "cluster_col_used": effective_cluster or "row-level",
+        "ci_method": "bca_cluster_bootstrap",
+        "n_boot": int(n_boot),
+        "bootstrap_level": bootstrap_level,
     }
     for metric, est in point.items():
+        jk = jackknife_arr.get(metric)
+        bca_low, bca_high, pctl_low, pctl_high = _bca_ci(est, boot_arr[metric], jk)
         result[metric] = {
             "estimate": round(est, 4),
-            "ci_low":  round(float(np.percentile(boot_arr[metric], 2.5)), 4),
-            "ci_high": round(float(np.percentile(boot_arr[metric], 97.5)), 4),
+            "ci_low": round(bca_low, 4) if np.isfinite(bca_low) else np.nan,
+            "ci_high": round(bca_high, 4) if np.isfinite(bca_high) else np.nan,
+            "ci_low_percentile": round(pctl_low, 4) if np.isfinite(pctl_low) else np.nan,
+            "ci_high_percentile": round(pctl_high, 4) if np.isfinite(pctl_high) else np.nan,
         }
 
     return result
@@ -283,6 +389,8 @@ def run_proportion_meta_analysis(
     """
     p = sites_df[rate_col].values
     n = sites_df[n_col].values
+    if (n <= 0).any():
+        raise ValueError(f"All '{n_col}' values must be > 0 for meta-analysis")
 
     logit_p, se_logit = logit_transform(p, n)
 
@@ -388,6 +496,8 @@ def run_meta_analysis(
     """
     eff = sites_df[estimate_col].values
     se = sites_df[se_col].values
+    if (se <= 0).any():
+        raise ValueError(f"All '{se_col}' values must be > 0 for meta-analysis")
     var = se ** 2
 
     res = combine_effects(
@@ -458,7 +568,7 @@ def sensitivity_leave_one_out(
 # TABLE 1 POOLING
 # ============================================================
 
-def pool_means(df: pd.DataFrame, mean_col: str, sd_col: str, n_col: str):
+def pool_means(df: pd.DataFrame, mean_col: str, sd_col: str, n_col: str) -> tuple[int, float, float]:
     """Pool means and SDs across sites using weighted formulas.
     Returns (N_total, pooled_mean, pooled_sd)."""
     n = df[n_col].values.astype(float)
@@ -471,7 +581,7 @@ def pool_means(df: pd.DataFrame, mean_col: str, sd_col: str, n_col: str):
     return int(N), pooled_mean, pooled_sd
 
 
-def pool_proportions(df: pd.DataFrame, num_col: str, n_col: str):
+def pool_proportions(df: pd.DataFrame, num_col: str, n_col: str) -> tuple[int, int, float]:
     """Pool proportions across sites.
     Returns (N_total, n_events, proportion)."""
     total_num = df[num_col].sum()
@@ -479,19 +589,62 @@ def pool_proportions(df: pd.DataFrame, num_col: str, n_col: str):
     return int(total_n), int(total_num), total_num / total_n if total_n > 0 else 0.0
 
 
-def pool_medians_iqr(df: pd.DataFrame, median_col: str,
-                     iqr_low_col: str, iqr_high_col: str, n_col: str):
-    """Pool medians using sample-size-weighted median (approximation).
-    Returns (N_total, weighted_median, weighted_iqr_low, weighted_iqr_high)."""
-    n = df[n_col].values.astype(float)
+def _weighted_quantile(
+    values: np.ndarray,
+    weights: np.ndarray,
+    quantile: float,
+) -> float:
+    """Compute weighted quantile in [0, 1] for 1D arrays."""
+    if len(values) == 0:
+        raise ValueError("Cannot compute weighted quantile on empty values")
+    if not 0.0 <= quantile <= 1.0:
+        raise ValueError("quantile must be in [0, 1]")
+
+    sorter = np.argsort(values)
+    v = values[sorter]
+    w = weights[sorter]
+    cumulative = np.cumsum(w)
+    total_weight = cumulative[-1]
+    if total_weight <= 0:
+        raise ValueError("weights must sum to a positive value")
+    cdf = cumulative / total_weight
+    idx = int(np.searchsorted(cdf, quantile, side="left"))
+    idx = min(max(idx, 0), len(v) - 1)
+    return float(v[idx])
+
+
+def pool_medians_iqr(
+    df: pd.DataFrame,
+    median_col: str,
+    iqr_low_col: str,
+    iqr_high_col: str,
+    n_col: str,
+) -> tuple[int, float, float, float]:
+    """Pool medians/IQR summaries using weighted quantiles of site summaries.
+
+    Notes
+    -----
+    This is still an approximation because only site summary statistics
+    (not patient-level raw values) are available. Unlike the prior implementation,
+    this now computes weighted quantiles (median/Q1/Q3) instead of weighted means.
+    """
+    cols = [median_col, iqr_low_col, iqr_high_col, n_col]
+    clean = df[cols].dropna().copy()
+    if clean.empty:
+        return 0, np.nan, np.nan, np.nan
+
+    n = clean[n_col].astype(float).values
     N = int(n.sum())
-    w_median = np.average(df[median_col].values, weights=n)
-    w_iqr_low = np.average(df[iqr_low_col].values, weights=n)
-    w_iqr_high = np.average(df[iqr_high_col].values, weights=n)
+    if N <= 0:
+        return 0, np.nan, np.nan, np.nan
+
+    w_median = _weighted_quantile(clean[median_col].astype(float).values, n, 0.50)
+    w_iqr_low = _weighted_quantile(clean[iqr_low_col].astype(float).values, n, 0.25)
+    w_iqr_high = _weighted_quantile(clean[iqr_high_col].astype(float).values, n, 0.75)
     return N, w_median, w_iqr_low, w_iqr_high
 
 
-def aggregate_table1(table1_df: pd.DataFrame) -> dict:
+def aggregate_table1(table1_df: pd.DataFrame) -> dict[str, Any]:
     """Aggregate Table 1 from all sites into pooled summary."""
     N, mean_age, sd_age = pool_means(table1_df, "age_mean", "age_sd", "n_total")
     _, n_male, pct_male = pool_proportions(table1_df, "n_male", "n_total")
