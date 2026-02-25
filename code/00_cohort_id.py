@@ -14,9 +14,9 @@ def _():
 @app.cell
 def _():
     import sys
+    import os
     sys.path.insert(0, os.path.join(os.pardir, 'utils'))
     import pandas as pd
-    import os
     from tqdm import tqdm
     import numpy as np
     import pytz
@@ -598,7 +598,7 @@ def _(json, np, vit_1):
     try:
         with open(_outlier_path, 'r') as _f:
             _outlier_cfg = _json.load(_f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, _json.JSONDecodeError):
         _outlier_cfg = {}
     if _outlier_cfg:
         _vitals_before = len(vit_1)
@@ -609,8 +609,9 @@ def _(json, np, vit_1):
                 vit_1.loc[_mask, 'vital_value'] = np.nan
         _nulled = vit_1['vital_value'].isna().sum()
         print(f'Vitals outlier thresholds applied. NaN values after: {_nulled}')
-        vit_weight_1 = vit_1[vit_1['vital_category'] == 'weight_kg'].reset_index(drop=True)  # Also update vit_weight with cleaned weights
-    return (vit_weight_1,)
+    # Always derive vit_weight_1 (whether or not outliers were applied)
+    vit_weight_1 = vit_1[vit_1['vital_category'] == 'weight_kg'].reset_index(drop=True)
+    return (vit_weight_1, _outlier_cfg,)
 
 
 @app.cell
@@ -703,7 +704,7 @@ def _(new_mac_1, tqdm):
 
 
 @app.cell
-def _(new_mac_2, np):
+def _(_outlier_cfg, new_mac_2, np):
     # H10 Fix: Apply outlier thresholds to medication doses after unit conversion
     if _outlier_cfg:
         _med_before = new_mac_2['med_dose'].notna().sum()
