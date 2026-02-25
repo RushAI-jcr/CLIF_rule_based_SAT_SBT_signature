@@ -1,13 +1,14 @@
 """
 Elixhauser Comorbidity Index with Van Walraven Weights.
 
-Implements AHRQ Elixhauser comorbidity categories (v2024.1) for ICD-10-CM
-and computes the Van Walraven composite score per hospitalization.
+Implements the Quan et al. (2005) ICD-10 coding algorithm for 31 Elixhauser
+comorbidity categories and computes the Van Walraven composite score per
+hospitalization.
 
 References:
     - Elixhauser A, et al. Med Care. 1998;36(1):8-27.
-    - van Walraven C, et al. Med Care. 2009;47(6):626-633.
-    - AHRQ Elixhauser Comorbidity Software v2024.1 (ICD-10-CM).
+    - Quan H, et al. Med Care. 2005;43(11):1130-9. (ICD-10 coding algorithm)
+    - van Walraven C, et al. Med Care. 2009;47(6):626-633. (weights)
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import pandas as pd
 # Each pattern anchored at start; trailing .* allows any suffix.
 # ---------------------------------------------------------------------------
 ELIXHAUSER_ICD10_REGEX: dict[str, str] = {
-    "congestive_heart_failure":     r"^(I09\.9|I11\.0|I13\.0|I13\.2|I25\.5|I42\.[05-9]|I43|I50|P29\.0)",
+    "congestive_heart_failure":     r"^(I09\.9|I11\.0|I13\.0|I13\.2|I25\.5|I42\.[0-9]|I43|I50|P29\.0)",
     "cardiac_arrhythmias":          r"^(I44\.[1-3]|I45\.[6-9]|I47|I48|I49|R00\.[0128]|T82\.1|Z45\.0|Z95\.0)",
     "valvular_disease":             r"^(A52\.0|I05|I06|I07|I08|I09\.[1-9]|I09\.89|I34|I35|I36|I37|I38|I39|Q23\.[0-3]|Z95\.[2-4])",
     "pulmonary_circulation":        r"^(I26|I27|I28\.[089])",
@@ -64,13 +65,13 @@ VAN_WALRAVEN_WEIGHTS: dict[str, int] = {
     "valvular_disease":            -1,
     "pulmonary_circulation":        4,
     "peripheral_vascular":          2,
-    "hypertension_uncomplicated":  -1,
+    "hypertension_uncomplicated":   0,  # van Walraven 2009 Table 2
     "hypertension_complicated":     0,
     "paralysis":                    7,
     "other_neurological":           6,
     "chronic_pulmonary":            3,
     "diabetes_uncomplicated":       0,
-    "diabetes_complicated":         0,
+    "diabetes_complicated":        -1,  # van Walraven 2009 Table 2
     "hypothyroidism":               0,
     "renal_failure":                5,
     "liver_disease":               11,
@@ -83,7 +84,7 @@ VAN_WALRAVEN_WEIGHTS: dict[str, int] = {
     "coagulopathy":                 3,
     "obesity":                     -4,
     "weight_loss":                  6,
-    "fluid_electrolyte":            5,
+    "fluid_electrolyte":           -3,  # van Walraven 2009 Table 2 (was incorrectly +5)
     "blood_loss_anemia":           -2,
     "deficiency_anemia":           -2,
     "alcohol_abuse":                0,
